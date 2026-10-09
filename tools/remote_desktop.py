@@ -110,13 +110,13 @@ def grab_frame(adb, tmp):
         return b""
 
 
-def run_gui(adb, w, h, rate, frame_bytes):
+def run_gui(adb, w, h, rate, frame_bytes, args_scale=1):
     """一体化窗口：画面 + 鼠标注入。"""
     import numpy
     import pygame
 
     pygame.init()
-    scale = max(1, min(3, 720 // h))   # 小面板放大到合适大小，别糊成邮票
+    scale = max(1, min(4, args_scale))   # 1 = 面板真实尺寸（320x240）
     win = pygame.display.set_mode((w * scale, h * scale))
     pygame.display.set_caption("QZcam 远程桌面（点击=触摸，拖动=滑动）")
     clock = pygame.time.Clock()
@@ -201,6 +201,7 @@ def main():
     ap.add_argument("--size", help="面板尺寸，如 320x240（默认从板子读）")
     ap.add_argument("--rate", type=float, default=8.0, help="目标帧率，默认 8")
     ap.add_argument("--noinput", action="store_true", help="只看模式（ffplay，不注入触摸）")
+    ap.add_argument("--scale", type=int, default=1, help="画面放大倍数，默认 1（面板真实尺寸）")
     ap.add_argument("--out", help="不开窗口，把 N 帧存成 PNG 到这个目录")
     ap.add_argument("--frames", type=int, default=5, help="--out 模式抓几帧，默认 5")
     args = ap.parse_args()
@@ -237,7 +238,7 @@ def main():
         run_ffplay(adb, w, h, args.rate, frame_bytes)
         return
 
-    run_gui(adb, w, h, args.rate, frame_bytes)
+    run_gui(adb, w, h, args.rate, frame_bytes, args.scale)
 
 
 if __name__ == "__main__":
