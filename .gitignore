@@ -1,0 +1,20 @@
+# 构建产物
+build/
+build-sim/
+out/
+
+# CMake 中间文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# 编辑器 / 工具
+.codebuddy/
+.vscode/
+.idea/
+*.swp
+
+# 运行时产物
+*.raw
+*.bmp
