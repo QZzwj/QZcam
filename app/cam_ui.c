@@ -195,6 +195,21 @@ static void update_storage_label(void)
 
 /* -------------------------------------------------------------- 取景刷新 */
 
+/* 有浮层/页面盖在预览上时，相机帧不能直写 fb（会把 LVGL 刚画的内容踩掉）。
+ * 这些页面都是滑入/滑出的，用 y 位置判断；常驻遮挡物（无信号浮层/toast、
+ * 相册/查看器）用 HIDDEN 标志判断。 */
+static bool preview_covered(void)
+{
+    if (!lv_obj_has_flag(nosignal_panel, LV_OBJ_FLAG_HIDDEN)) return true;
+    if (!lv_obj_has_flag(toast_label, LV_OBJ_FLAG_HIDDEN)) return true;
+    if (lv_obj_get_y(settings_page) < qzcam_panel_h) return true;
+    if (lv_obj_get_y(mode_sheet) < qzcam_panel_h) return true;
+    if (lv_obj_get_y(drawer) < qzcam_panel_h) return true;
+    if (!lv_obj_has_flag(gallery, LV_OBJ_FLAG_HIDDEN)) return true;
+    if (!lv_obj_has_flag(viewer, LV_OBJ_FLAG_HIDDEN)) return true;
+    return false;
+}
+
 static void preview_timer(lv_timer_t *timer)
 {
     (void)timer;
@@ -203,7 +218,18 @@ static void preview_timer(lv_timer_t *timer)
 
     if (pixels && id != shown_seq) {
         shown_seq = id;
-        if (!preview_ready) {
+        int stride_px = 0;
+        uint16_t *fb = qzcam_panel_fb_map(&stride_px);
+        if (fb && !preview_covered()) {
+            /* 真机：相机帧直写 framebuffer（绕过 LVGL），UI 只局部重绘控件。
+             * 这是动效流畅的关键 —— 否则每帧全屏重渲染 + 全屏 SPI 刷写。 */
+            int w = qzcam_cam_frame_w(), h = qzcam_cam_frame_h();
+            const uint16_t *src = (const uint16_t *)pixels;
+            for (int y = 0; y < h; y++)
+                memcpy(fb + (size_t)y * stride_px, src + (size_t)y * w,
+                       (size_t)w * 2);
+        } else if (!preview_ready) {
+            /* 模拟器：走 lv_image */
             preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
             preview_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
             preview_dsc.header.w = (uint32_t)qzcam_cam_frame_w();

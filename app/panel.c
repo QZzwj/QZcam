@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "lvgl.h"
@@ -58,4 +59,43 @@ void qzcam_panel_init(void)
     }
 #endif
     fprintf(stderr, "QZcam: 面板 %dx%d\n", qzcam_panel_w, qzcam_panel_h);
+}
+
+/* ---- 取景直写 framebuffer ------------------------------------------- *
+ * 相机帧绕过 LVGL 直接 memcpy 进 fb（UI 只局部重绘控件），否则每帧全屏
+ * 重渲染 + 全屏 SPI 刷写，动效必卡。模拟器没有 fb，返回 NULL 走 lv_image。 */
+static uint16_t *fb_map;
+static int fb_stride_px;
+
+uint16_t *qzcam_panel_fb_map(int *stride_px)
+{
+#if LV_USE_SIMULATOR
+    (void)stride_px;
+    return NULL;
+#else
+    if (fb_map) {
+        if (stride_px) *stride_px = fb_stride_px;
+        return fb_map;
+    }
+    const char *device = getenv("QZCAM_FB");
+    if (!device || !device[0]) device = "/dev/fb0";
+    int fd = open(device, O_RDWR);
+    if (fd < 0) return NULL;
+    struct fb_fix_screeninfo finfo;
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) != 0 ||
+        finfo.line_length < (size_t)qzcam_panel_w * 2) {
+        close(fd);
+        return NULL;
+    }
+    fb_map = mmap(NULL, (size_t)finfo.smem_len, PROT_READ | PROT_WRITE,
+                  MAP_SHARED, fd, 0);
+    close(fd);   /* mmap 保留了映射，fd 可以关 */
+    if (fb_map == MAP_FAILED) {
+        fb_map = NULL;
+        return NULL;
+    }
+    fb_stride_px = (int)(finfo.line_length / 2);
+    if (stride_px) *stride_px = fb_stride_px;
+    return fb_map;
+#endif
 }

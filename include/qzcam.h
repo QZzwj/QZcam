@@ -21,6 +21,13 @@ extern int qzcam_panel_h;
 /** 探测面板尺寸：模拟器读 QZCAM_PANEL（默认 320x240），真机读 QZCAM_FB（默认 /dev/fb0）。 */
 void qzcam_panel_init(void);
 
+/**
+ * 真机 framebuffer 的直写映射（RGB565）。模拟器返回 NULL（走 lv_image 路径）。
+ * stride_px：一行多少个像素（fb 的 line_length/2，可能大于屏宽）。
+ * 返回的指针由 panel.c 持有，调用方只写不释放。
+ */
+uint16_t *qzcam_panel_fb_map(int *stride_px);
+
 /** 运行参数。界面上的参数抽屉改的就是这个结构，取景线程每帧读它。 */
 typedef struct {
     /* ---- 叠加与画面（逐像素生效，立即见效） ---- */
