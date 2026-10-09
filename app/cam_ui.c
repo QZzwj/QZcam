@@ -75,10 +75,6 @@ static lv_obj_t *rec_capsule;
 static lv_obj_t *rec_dot;
 static lv_obj_t *rec_time_label;
 
-/* 规格胶囊（右上，一排小标签合成一行文本） */
-static lv_obj_t *chips_label;
-static lv_obj_t *chips_extra_label; /* HDR/EIS/夜视 等开启项，橙色 */
-
 /* 模式选择器（横向卡片） */
 static lv_obj_t *mode_sheet;
 static lv_obj_t *mode_cards[5];
@@ -436,26 +432,6 @@ static void update_mode_ui(void)
         lv_obj_set_style_border_width(mode_cards[i], on ? 2 : 1, 0);
         lv_obj_set_style_bg_color(mode_cards[i], on ? COLOR_CARD_2 : COLOR_CARD, 0);
         lv_obj_set_style_bg_opa(mode_cards[i], on ? LV_OPA_COVER : LV_OPA_70, 0);
-    }
-
-    /* 规格胶囊：按当前设置汇总 */
-    if (chips_label) {
-        static const char *res_names[3] = { "2304×1296", "1920×1080", "1280×720" };
-        lv_label_set_text_fmt(chips_label, "%s · %dfps · %s",
-                              res_names[s->resolution % 3],
-                              s->rec_fps,
-                              s->codec == 0 ? "H.265" : "H.264");
-    }
-    if (chips_extra_label) {
-        char extra[64] = "";
-        if (s->hdr) strcat(extra, "HDR ");
-        if (s->wdr) strcat(extra, "WDR ");
-        if (s->eis) strcat(extra, "EIS ");
-        if (s->night_mode) strcat(extra, "夜视 ");
-        if (s->isp_denoise) strcat(extra, "降噪");
-        lv_label_set_text(chips_extra_label, extra);
-        if (extra[0]) lv_obj_remove_flag(chips_extra_label, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(chips_extra_label, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1050,6 +1026,9 @@ static void build_gallery(lv_obj_t *screen)
     lv_obj_t *close = make_button(bar, "返回", 52, 20, 6);
     lv_obj_align(close, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_add_event_cb(close, gallery_close_cb, LV_EVENT_CLICKED, NULL);
+    /* 存储余量放相册顶栏（预览画面上不再常驻） */
+    storage_label = make_label(bar, "", 9, COLOR_DIM);
+    lv_obj_align(storage_label, LV_ALIGN_RIGHT_MID, -64, 0);
 
     gallery_list = lv_obj_create(gallery);
     lv_obj_set_size(gallery_list, qzcam_panel_w, qzcam_panel_h - 24);
@@ -1170,21 +1149,10 @@ rec_capsule = lv_obj_create(screen);
     rec_time_label = make_label(rec_capsule, "00:00", 12, COLOR_TEXT);
     lv_obj_align(rec_time_label, LV_ALIGN_LEFT_MID, 22, 0);
 
-    /* 规格胶囊行（y=44）：左=规格汇总（橙），右=开启的增强项 */
-chips_label = make_label(screen, "", 10, COLOR_DIM);
-    lv_obj_align(chips_label, LV_ALIGN_TOP_LEFT, 8, 44);
-    lv_obj_remove_flag(chips_label, LV_OBJ_FLAG_CLICKABLE);
-    chips_extra_label = make_label(screen, "", 10, COLOR_ACCENT);
-    lv_obj_align(chips_extra_label, LV_ALIGN_TOP_LEFT, 8, 58);
-    lv_obj_remove_flag(chips_extra_label, LV_OBJ_FLAG_CLICKABLE);
-
-    storage_label = make_label(screen, "", 10, COLOR_DIM);
-    lv_obj_align(storage_label, LV_ALIGN_TOP_RIGHT, -8, 44);
-    lv_obj_remove_flag(storage_label, LV_OBJ_FLAG_CLICKABLE);
-
-    /* 时间戳开关控制的那块时钟：预览右上 */
-    clock_label = make_label(screen, "--:--:--", 12, COLOR_TEXT);
-    lv_obj_align(clock_label, LV_ALIGN_TOP_RIGHT, -8, 58);
+    /* 预览画面保持干净：规格/增强项/存储都不再常驻（分别看模式抽屉、
+     * 设置页、相册顶栏）。顶栏右侧 = 实测帧率 + 时间戳开关控制的小时钟。 */
+    clock_label = make_label(top, "--:--:--", 10, COLOR_DIM);
+    lv_obj_align(clock_label, LV_ALIGN_RIGHT_MID, -56, 0);
 
     /* 底部悬浮控制条：相册 / 大快门 / 模式 / 设置（圆角悬浮卡片） */
 lv_obj_t *bottom = lv_obj_create(screen);
