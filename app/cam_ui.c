@@ -865,11 +865,12 @@ static int cycle_rows_used;
 
 static const int cycle_res[]   = { 0, 1, 2 };
 static const char *const cycle_res_names[]   = { "2304×1296", "1920×1080", "1280×720" };
-/* 帧率档：>30 的档位走"高速模式"——传感器驱动换成社区的 640x480@75fps 版
- * （LuckfoxTECH/luckfox-pico#67 的 sc3336.json→sc3336.ko），重启后由启动脚本
- * 换模块 + 换 IQ 生效；75fps 出流，录像按所选档抽帧。 */
-static const int cycle_fps[]   = { 75, 60, 30, 25, 15 };
-static const char *const cycle_fps_names[]   = { "75fps", "60fps", "30fps", "25fps", "15fps" };
+/* 帧率档：标准模式（SC3336 2304x1296@30）。社区 75fps 驱动实测
+ * "传感器出流正常但 rkaiq 主通路全黑"（LuckfoxTECH/luckfox-pico#67），
+ * 暂不上 —— 驱动/IQ 文件仍留在镜像里（lib/camera/sc3336_75.ko），
+ * 要再试时参考 git 历史。 */
+static const int cycle_fps[]   = { 30, 25, 15 };
+static const char *const cycle_fps_names[]   = { "30fps", "25fps", "15fps" };
 static const int cycle_codec[] = { 0, 1 };
 static const char *const cycle_codec_names[] = { "H.265", "H.264" };
 static const int cycle_br[]    = { 0, 1, 2 };
@@ -974,7 +975,7 @@ static void build_settings(lv_obj_t *screen)
     int y = 4;
     make_group_header(list, y, "录制"); y += 16;
     make_cycle_row(list, y, "分辨率", &s->resolution, cycle_res, cycle_res_names, 3); y += 26;
-    make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 5); y += 26;
+    make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 3); y += 26;
     make_cycle_row(list, y, "编码格式", &s->codec, cycle_codec, cycle_codec_names, 2); y += 26;
     make_cycle_row(list, y, "码率控制", &s->bitrate_mode, cycle_br, cycle_br_names, 3); y += 26;
     make_switch_row(list, y, "电子防抖", &s->eis); y += 30;
