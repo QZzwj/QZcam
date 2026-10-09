@@ -111,7 +111,7 @@ static const set_entry_t set_entries[] = {
     { "fps",           NULL,                    &settings.fps,        5,  30 },
     { "mode",          NULL,                    &settings.mode,       0,   4 },
     { "resolution",    NULL,                    &settings.resolution, 0,   2 },
-    { "rec_fps",       NULL,                    &settings.rec_fps,   15,  30 },
+    { "rec_fps",       NULL,                    &settings.rec_fps,   15,  75 },
     { "codec",         NULL,                    &settings.codec,      0,   1 },
     { "bitrate_mode",  NULL,                    &settings.bitrate_mode, 0, 2 },
     { "eis",           &settings.eis,           NULL,               0,   1 },
@@ -164,6 +164,18 @@ void qzcam_settings_save(void)
     }
     fclose(fp);
     rename(tmp, path);   /* 原子替换，断电也不会留半个文件 */
+
+    /* 高速模式（SC3336 640x480@75fps，社区驱动）标记：录像帧率 >30 才需要换
+     * 传感器驱动。模块与 IQ 的替换由 S30qzcam 在下次开机时做 —— 运行中换
+     * rkaiq 正在用的模块会炸，所以这里只落标记（界面会 toast 提示重启）。 */
+    FILE *m = NULL;
+    if (settings.rec_fps > 30) {
+        m = fopen("/oem/usr/etc/qzcam-hispeed", "w");
+        if (m) { fputs("75\n", m); fclose(m); }
+    } else {
+        remove("/oem/usr/etc/qzcam-hispeed");
+    }
+    (void)m;
 }
 
 void qzcam_settings_load(void)

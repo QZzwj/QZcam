@@ -889,8 +889,11 @@ static int cycle_rows_used;
 
 static const int cycle_res[]   = { 0, 1, 2 };
 static const char *const cycle_res_names[]   = { "2304×1296", "1920×1080", "1280×720" };
-static const int cycle_fps[]   = { 30, 25, 15 };
-static const char *const cycle_fps_names[]   = { "30fps", "25fps", "15fps" };
+/* 帧率档：>30 的档位走"高速模式"——传感器驱动换成社区的 640x480@75fps 版
+ * （LuckfoxTECH/luckfox-pico#67 的 sc3336.json→sc3336.ko），重启后由启动脚本
+ * 换模块 + 换 IQ 生效；75fps 出流，录像按所选档抽帧。 */
+static const int cycle_fps[]   = { 75, 60, 30, 25, 15 };
+static const char *const cycle_fps_names[]   = { "75fps", "60fps", "30fps", "25fps", "15fps" };
 static const int cycle_codec[] = { 0, 1 };
 static const char *const cycle_codec_names[] = { "H.265", "H.264" };
 static const int cycle_br[]    = { 0, 1, 2 };
@@ -910,9 +913,17 @@ static void cycle_row_cb(lv_event_t *event)
     int idx = 0;
     for (int i = 0; i < r->count; i++)
         if (*r->value == r->values[i]) { idx = i; break; }
+    int old = *r->value;
     idx = (idx + 1) % r->count;
     *r->value = r->values[idx];
     lv_label_set_text(r->label, r->labels[idx]);
+    /* 帧率 >30 要换传感器驱动（高速模式），只能在下次开机生效 —— 明说，
+     * 别让人以为立刻切过去了。 */
+    if (r->value == &qzcam_settings()->rec_fps) {
+        bool hi_new = *r->value > 30, hi_old = old > 30;
+        if (hi_new != hi_old)
+            toast(hi_new ? "高速模式：重启后生效" : "标准模式：重启后生效");
+    }
     update_mode_ui();
     persist();
 }
@@ -987,7 +998,7 @@ static void build_settings(lv_obj_t *screen)
     int y = 4;
     make_group_header(list, y, "录制"); y += 16;
     make_cycle_row(list, y, "分辨率", &s->resolution, cycle_res, cycle_res_names, 3); y += 26;
-    make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 3); y += 26;
+    make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 5); y += 26;
     make_cycle_row(list, y, "编码格式", &s->codec, cycle_codec, cycle_codec_names, 2); y += 26;
     make_cycle_row(list, y, "码率控制", &s->bitrate_mode, cycle_br, cycle_br_names, 3); y += 26;
     make_switch_row(list, y, "电子防抖", &s->eis); y += 30;

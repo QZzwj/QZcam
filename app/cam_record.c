@@ -205,8 +205,8 @@ bool qzcam_rec_start(char *path, unsigned path_size)
     const qzcam_settings_t *s = qzcam_settings();
     width = qzcam_panel_w;
     height = qzcam_panel_h;
-    fps = s->fps > 0 ? s->fps : 15;
-    if (fps > 30) fps = 30;
+    fps = s->rec_fps > 0 ? s->rec_fps : (s->fps > 0 ? s->fps : 15);
+    if (fps > 75) fps = 75;   /* 高速模式传感器实际出 75fps，录像最多跟到这 */
     if (width <= 0 || height <= 0) {
         pthread_mutex_unlock(&lock);
         return false;
