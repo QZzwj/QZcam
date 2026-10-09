@@ -40,6 +40,7 @@ add_executable(qzcam
     app/panel.c
     app/font.c
     app/cam_core.c
+    app/cam_player.c
     app/cam_isp.c
     app/touch.c
     app/cam_storage.c

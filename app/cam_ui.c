@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "cam_core.h"
+#include "cam_player.h"
 #include "cam_record.h"
 #include "cam_settings.h"
 #include "cam_storage.h"
@@ -66,6 +67,16 @@ static lv_obj_t *gallery;
 static lv_obj_t *gallery_list;
 static lv_obj_t *viewer;
 static lv_obj_t *viewer_image;
+
+/* 视频播放器（板载 AVI 回放） */
+static lv_obj_t *player_screen;
+static lv_obj_t *player_image;
+static lv_obj_t *player_time;
+static lv_obj_t *player_bar;
+static lv_timer_t *player_timer;
+static bool player_playing;
+static lv_image_dsc_t player_dsc;
+static int player_total;
 static lv_obj_t *grid_lines[4];
 static lv_obj_t *shutter_button;
 static lv_obj_t *shutter_core;      /* 快门内圆：视频模式变红 */
@@ -201,7 +212,8 @@ static void preview_timer(lv_timer_t *timer)
     uint32_t id = 0;
     const uint8_t *pixels = qzcam_cam_frame(&id);
 
-    if (pixels && id != shown_seq) {
+    if (pixels && id != shown_seq && !player_timer) {
+        /* 播放器打开时取景暂停：视频是全屏刷新，别跟它抢 */
         shown_seq = id;
         if (!preview_ready) {
             preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -304,6 +316,55 @@ static void viewer_close_cb(lv_event_t *event)
     lv_obj_add_flag(viewer, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void player_stop(void)
+{
+    player_playing = false;
+    if (player_timer) {
+        lv_timer_del(player_timer);
+        player_timer = NULL;
+    }
+    qzcam_player_close();
+    lv_obj_add_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void player_close_cb(lv_event_t *event)
+{
+    (void)event;
+    player_stop();
+}
+
+static void player_toggle_cb(lv_event_t *event)
+{
+    (void)event;
+    player_playing = !player_playing;   /* 点画面 = 暂停/继续 */
+    if (player_playing && player_timer)
+        lv_timer_resume(player_timer);
+    else if (player_timer)
+        lv_timer_pause(player_timer);
+}
+
+static void player_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!player_playing) return;
+
+    const uint8_t *f = qzcam_player_next_frame();
+    if (!f) {
+        player_stop();                   /* 播完自动回相册 */
+        return;
+    }
+    player_dsc.data = f;
+    lv_image_set_src(player_image, &player_dsc);   /* 每帧重设：换了 data 不重设，v9 不会重画 */
+    lv_obj_invalidate(player_image);
+
+    int cur = qzcam_player_frame_index();
+    int total = player_total;
+    lv_bar_set_value(player_bar, total ? (int32_t)(cur * 100 / total) : 0, LV_ANIM_OFF);
+    lv_label_set_text_fmt(player_time, "%02d:%02d / %02d:%02d",
+                          cur / 60 / qzcam_player_fps(), cur / qzcam_player_fps() % 60,
+                          total / 60 / qzcam_player_fps(), total / qzcam_player_fps() % 60);
+}
+
 static void gallery_item_cb(lv_event_t *event)
 {
     gallery_entry_t *entry = (gallery_entry_t *)lv_event_get_user_data(event);
@@ -313,7 +374,31 @@ static void gallery_item_cb(lv_event_t *event)
     snprintf(path, sizeof(path), "A:%s/%s", qzcam_storage_dir(), entry->name);
 
     if (entry->video) {
-        toast("录像文件：拉到电脑用 VLC/ffplay 播放");
+        /* 板载回放：AVI 是自家写的未压缩 RGB565，直接读块+翻行 */
+        char fs_path[512];
+        snprintf(fs_path, sizeof(fs_path), "%s/%s", qzcam_storage_dir(), entry->name);
+        if (!qzcam_player_open(fs_path)) {
+            toast("打不开录像文件");
+            return;
+        }
+        int w = qzcam_player_frame_w(), h = qzcam_player_frame_h();
+        memset(&player_dsc, 0, sizeof(player_dsc));
+        player_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        player_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        player_dsc.header.w = (uint32_t)w;
+        player_dsc.header.h = (uint32_t)h;
+        player_dsc.header.stride = (uint32_t)w * 2;
+        player_dsc.data_size = (uint32_t)(w * h * 2);
+        player_total = qzcam_player_total_frames();
+        lv_bar_set_value(player_bar, 0, LV_ANIM_OFF);
+
+        lv_obj_remove_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(player_screen);
+
+        int period = 1000 / (qzcam_player_fps() > 0 ? qzcam_player_fps() : 15);
+        if (period < 20) period = 20;
+        player_playing = true;
+        player_timer = lv_timer_create(player_tick, (uint32_t)period, NULL);
         return;
     }
     /* 照片：全屏看（LVGL 自带 BMP 解码 + FS_STDIO，路径用 A: 前缀） */
@@ -1059,6 +1144,34 @@ static void build_gallery(lv_obj_t *screen)
     lv_obj_t *back = make_button(viewer, "返回", 52, 22, 6);
     lv_obj_align(back, LV_ALIGN_TOP_RIGHT, -6, 6);
     lv_obj_add_event_cb(back, viewer_close_cb, LV_EVENT_CLICKED, NULL);
+
+    /* ---- 视频播放器（录像 = 未压缩 RGB565 AVI，板上直接放）---- */
+    player_screen = lv_obj_create(screen);
+    lv_obj_remove_flag(player_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(player_screen, qzcam_panel_w, qzcam_panel_h);
+    lv_obj_set_pos(player_screen, 0, 0);
+    lv_obj_set_style_bg_color(player_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(player_screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(player_screen, 0, 0);
+    lv_obj_set_style_radius(player_screen, 0, 0);
+    lv_obj_set_style_pad_all(player_screen, 0, 0);
+    lv_obj_add_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(player_screen, player_toggle_cb, LV_EVENT_CLICKED, NULL);
+
+    player_image = lv_image_create(player_screen);
+    lv_obj_set_size(player_image, qzcam_panel_w, qzcam_panel_h);
+    lv_obj_set_pos(player_image, 0, 0);
+
+    lv_obj_t *pback = make_button(player_screen, "返回", 52, 22, 6);
+    lv_obj_align(pback, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_add_event_cb(pback, player_close_cb, LV_EVENT_CLICKED, NULL);
+
+    player_time = make_label(player_screen, "00:00 / 00:00", 12, COLOR_TEXT);
+    lv_obj_align(player_time, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    player_bar = lv_bar_create(player_screen);
+    lv_obj_set_size(player_bar, qzcam_panel_w - 24, 4);
+    lv_obj_align(player_bar, LV_ALIGN_BOTTOM_MID, 0, -24);
 }
 
 void qzcam_ui_open_gallery(void)
