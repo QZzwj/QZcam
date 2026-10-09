@@ -33,7 +33,8 @@
  *   QZCAM_BACKEND=fake|v4l2   强制后端（默认走真机 V4L2；fake 只在自检时用）
  *   QZCAM_DEV=/dev/videoN     指定取景节点（跳过名字探测）
  *   QZCAM_CAPTURE=640x480     向驱动请求的采集尺寸
- *   QZCAM_DIR=/path           快门存图目录（默认 /userdata/qzcam，退回 /tmp/qzcam）
+ *   QZCAM_DIR=/path           快门存图目录（不设则 SD 卡优先：/mnt/sdcard →
+ *                             /userdata/qzcam → /tmp/qzcam，周期性重探支持热插拔）
  */
 
 /** 启动取景。已在跑时返回 false；失败原因看 qzcam_cam_status()。 */

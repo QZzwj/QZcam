@@ -64,21 +64,32 @@ void qzcam_storage_refresh(void)
     snprintf(label, sizeof(label), "不可写");
 }
 
+/* 周期性重扫：开机没插卡先落到 flash，之后插上 SD 卡，新照片/录像自动
+ * 切到 SD（已写的内容不动）。重扫很便宜（一次 stat + 一次写探针），UI 每
+ * 秒都会进来，32 次约半分钟重探一次足够灵敏。 */
+static unsigned probe_tick;
+
+static void refresh_if_stale(void)
+{
+    if (dir[0] == '\0' || ++probe_tick % 32 == 0)
+        qzcam_storage_refresh();
+}
+
 const char *qzcam_storage_dir(void)
 {
-    if (dir[0] == '\0') qzcam_storage_refresh();
+    refresh_if_stale();
     return dir[0] ? dir : "/tmp";
 }
 
 const char *qzcam_storage_label(void)
 {
-    if (dir[0] == '\0') qzcam_storage_refresh();
+    refresh_if_stale();
     return label;
 }
 
 bool qzcam_storage_ready(void)
 {
-    if (dir[0] == '\0') qzcam_storage_refresh();
+    refresh_if_stale();
     return ready;
 }
 
