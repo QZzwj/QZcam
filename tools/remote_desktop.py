@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""QZcam 远程桌面：把板子的 LCD（/dev/fb0，RGB565）通过 adb 投到电脑上。
-
-为什么不是 scrcpy：scrcpy 只能投 Android 设备（要 SurfaceFlinger 截屏 +
-MediaCodec 编码 + Android 输入注入），板子是 Buildroot Linux，一条都不满足。
-这里是等效做法：**帧缓冲直读 + LVGL 的虚拟触摸屏**，看和点都不缺。
+"""QZcam 远程桌面：把板子的 LCD（/dev/fb0，RGB565）通过 adb 投到电脑上，
+**鼠标就是触摸屏** —— 等效 scrcpy 的体验（板子不是 Android，scrcpy 用不了，
+这里用 帧缓冲直读 + uitap 虚拟触摸屏 等效实现）。
 
 用法：
-  tools/remote_desktop.py                      # 打开实时窗口（ffplay，约 3~6fps）
-  tools/remote_desktop.py --rate 8             # 目标帧率（每帧一次 adb pull）
+  tools/remote_desktop.py                  # 一体化窗口：实时画面 + 点击/拖动注入（需 pygame）
+  tools/remote_desktop.py --rate 10        # 目标帧率
   tools/remote_desktop.py --adb /mnt/d/adb/adb.exe
-  tools/remote_desktop.py --out /tmp/rd --frames 5   # 不开窗口，抓 N 帧存 PNG（CI/验收）
+  tools/remote_desktop.py --noinput        # 只看不动（免装 pygame，走 ffplay）
+  tools/remote_desktop.py --out /tmp/rd --frames 5   # 抓 N 帧存 PNG（CI/验收）
 
-远程点按（配合板上的 uitap 虚拟触摸屏，面板 320x240）：
-  adb shell "echo 'tap 160 217' > /tmp/qz-touch.fifo"    # 快门
-  adb shell "echo 'tap 288 225' > /tmp/qz-touch.fifo"    # 参数
-  adb shell "echo 'swipe 160 200 160 100 400' > /tmp/qz-touch.fifo"
+操作（pygame 窗口内）：
+  鼠标左键点击   → tap（点击屏幕坐标）
+  按住拖动       → swipe（按下→松开整段轨迹）
+  Ctrl+C / 关窗  → 退出
+
+前提：adb 已连板；板上 uitap 在跑（/tmp/qz-touch.fifo 存在，固件自带）。
 """
 
 import argparse
@@ -58,11 +59,142 @@ def read_panel(adb, size_arg):
         return 320, 240
 
 
+class TouchInjector:
+    """把窗口里的鼠标事件转成板上的 tap/swipe（写 uitap 的 fifo）。"""
+
+    def __init__(self, adb, panel_w, panel_h):
+        self.adb = adb
+        self.pw = panel_w
+        self.ph = panel_h
+        self.down = None   # (x, y) 按下点（面板坐标）
+
+    def _send(self, cmd):
+        try:
+            subprocess.run([self.adb, "shell",
+                            "echo '%s' > /tmp/qz-touch.fifo" % cmd],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+    def _map(self, px, py, win_w, win_h):
+        """窗口像素 → 面板坐标（窗口可能被放大了）。"""
+        return (int(px * self.pw / max(win_w, 1)),
+                int(py * self.ph / max(win_h, 1)))
+
+    def on_down(self, px, py, win_w, win_h):
+        self.down = self._map(px, py, win_w, win_h)
+
+    def on_up(self, px, py, win_w, win_h):
+        if self.down is None:
+            return
+        end = self._map(px, py, win_w, win_h)
+        dx, dy = end[0] - self.down[0], end[1] - self.down[1]
+        if abs(dx) < 12 and abs(dy) < 12:
+            self._send("tap %d %d" % end)
+        else:
+            self._send("swipe %d %d %d %d 250" % (self.down[0], self.down[1], end[0], end[1]))
+        self.down = None
+
+
+def grab_frame(adb, tmp):
+    subprocess.run([adb, "pull", "/dev/fb0", tmp], capture_output=True, timeout=10)
+    try:
+        return open(tmp, "rb").read()
+    except FileNotFoundError:
+        return b""
+
+
+def run_gui(adb, w, h, rate, frame_bytes):
+    """一体化窗口：画面 + 鼠标注入。"""
+    import numpy
+    import pygame
+
+    pygame.init()
+    scale = max(1, min(3, 720 // h))   # 小面板放大到合适大小，别糊成邮票
+    win = pygame.display.set_mode((w * scale, h * scale))
+    pygame.display.set_caption("QZcam 远程桌面（点击=触摸，拖动=滑动）")
+    clock = pygame.time.Clock()
+    injector = TouchInjector(adb, w, h)
+    tmp = os.path.join(tempfile.gettempdir(), "qzcam_fb_pull.raw")
+    print("  窗口 %dx%d（面板 %dx%d ×%d）—— 左键点按，拖动=滑动" %
+          (w * scale, h * scale, w, h, scale))
+
+    running = True
+    ok = bad = 0
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                injector.on_down(event.pos[0], event.pos[1],
+                                 win.get_width(), win.get_height())
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                injector.on_up(event.pos[0], event.pos[1],
+                               win.get_width(), win.get_height())
+
+        data = grab_frame(adb, tmp)
+        if len(data) == frame_bytes:
+            px = numpy.frombuffer(data, dtype=numpy.uint16).reshape(h, w)
+            r = ((px >> 11) & 0x1F) << 3
+            g = ((px >> 5) & 0x3F) << 2
+            b = (px & 0x1F) << 3
+            rgb = numpy.dstack((r, g, b)).transpose(1, 0, 2)   # (w,h,3)
+            surf = pygame.surfarray.make_surface(rgb)
+            if scale > 1:
+                surf = pygame.transform.scale(surf, (w * scale, h * scale))
+            win.blit(surf, (0, 0))
+            pygame.display.flip()
+            ok += 1
+        else:
+            bad += 1
+        clock.tick(rate)
+    pygame.quit()
+    print(f"  结束：{ok} 帧，跳过 {bad} 帧")
+
+
+def run_ffplay(adb, w, h, rate, frame_bytes):
+    """只看模式：喂 ffplay（没有 pygame 时）。"""
+    ffplay = shutil.which("ffplay")
+    if not ffplay:
+        sys.exit("没找到 ffplay（--noinput 模式需要，或 pip3 install pygame numpy 用一体化窗口）")
+    player = subprocess.Popen(
+        [ffplay, "-loglevel", "quiet", "-f", "rawvideo", "-pixel_format", "rgb565le",
+         "-video_size", f"{w}x{h}", "-framerate", str(rate), "-i", "-",
+         "-window_title", "QZcam 远程桌面（只看；点按请用 pygame 模式）"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    tmp = os.path.join(tempfile.gettempdir(), "qzcam_fb_pull.raw")
+    print("  投屏中（只看），Ctrl+C 退出")
+    ok = bad = 0
+    try:
+        while player.poll() is None:
+            data = grab_frame(adb, tmp)
+            if len(data) != frame_bytes:
+                bad += 1
+                continue
+            try:
+                player.stdin.write(data)
+                player.stdin.flush()
+                ok += 1
+            except BrokenPipeError:
+                break
+            time.sleep(1.0 / max(rate, 0.5))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            player.stdin.close()
+        except Exception:
+            pass
+        player.terminate()
+    print(f"  结束：成功 {ok} 帧，跳过 {bad} 帧")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="QZcam 远程桌面（adb + /dev/fb0）")
+    ap = argparse.ArgumentParser(description="QZcam 远程桌面（adb + /dev/fb0 + uitap）")
     ap.add_argument("--adb", help="adb 路径（默认自动找）")
     ap.add_argument("--size", help="面板尺寸，如 320x240（默认从板子读）")
-    ap.add_argument("--rate", type=float, default=5.0, help="目标帧率，默认 5")
+    ap.add_argument("--rate", type=float, default=8.0, help="目标帧率，默认 8")
+    ap.add_argument("--noinput", action="store_true", help="只看模式（ffplay，不注入触摸）")
     ap.add_argument("--out", help="不开窗口，把 N 帧存成 PNG 到这个目录")
     ap.add_argument("--frames", type=int, default=5, help="--out 模式抓几帧，默认 5")
     args = ap.parse_args()
@@ -70,71 +202,36 @@ def main():
     adb = find_adb(args.adb)
     w, h = read_panel(adb, args.size)
     frame_bytes = w * h * 2
-    delay = 1.0 / max(args.rate, 0.5)
     print(f"QZcam 远程桌面: {adb}  面板 {w}x{h}  目标 {args.rate:.1f}fps")
-
-    tmp = os.path.join(tempfile.gettempdir(), "qzcam_fb_pull.raw")
 
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         from PIL import Image
-        saved = 0
-        while saved < args.frames:
-            subprocess.run([adb, "pull", "/dev/fb0", tmp],
-                           capture_output=True, timeout=10)
-            data = open(tmp, "rb").read()
-            if len(data) != frame_bytes:
-                continue
-            saved += 1
+        tmp = os.path.join(tempfile.gettempdir(), "qzcam_fb_pull.raw")
+        for saved in range(1, args.frames + 1):
+            while True:
+                data = grab_frame(adb, tmp)
+                if len(data) == frame_bytes:
+                    break
             path = os.path.join(args.out, f"frame_{saved:02d}.png")
             Image.frombytes("RGB", (w, h), data, "raw", "BGR;16").save(path)
             print(f"  已存 {path}")
-            time.sleep(delay)
+            time.sleep(1.0 / max(args.rate, 0.5))
         return
 
-    ffplay = shutil.which("ffplay") or shutil.which("ffmpeg")
-    if not ffplay:
-        sys.exit("没找到 ffplay/ffmpeg（--out 模式只需要 Pillow）")
+    if args.noinput:
+        run_ffplay(adb, w, h, args.rate, frame_bytes)
+        return
 
-    if os.path.basename(ffplay) == "ffplay":
-        player = [ffplay, "-loglevel", "quiet", "-f", "rawvideo",
-                  "-pixel_format", "rgb565le", "-video_size", f"{w}x{h}",
-                  "-framerate", str(args.rate), "-i", "-",
-                  "-window_title", "QZcam 远程桌面"]
-    else:  # 只有 ffmpeg 时落盘成 mp4（Ctrl+C 停止）
-        player = [ffplay, "-y", "-loglevel", "error", "-f", "rawvideo",
-                  "-pixel_format", "rgb565le", "-video_size", f"{w}x{h}",
-                  "-framerate", str(args.rate), "-i", "-",
-                  "-c:v", "libx264", "-preset", "ultrafast", "/tmp/qzcam_rd.mp4"]
-
-    player_proc = subprocess.Popen(player, stdin=subprocess.PIPE,
-                                   stdout=subprocess.DEVNULL)
-    print("  投屏中，Ctrl+C 退出。远程点按见文件头注释。")
-    ok = bad = 0
     try:
-        while player_proc.poll() is None:
-            subprocess.run([adb, "pull", "/dev/fb0", tmp],
-                           capture_output=True, timeout=10)
-            data = open(tmp, "rb").read()
-            if len(data) != frame_bytes:
-                bad += 1
-                continue
-            try:
-                player_proc.stdin.write(data)
-                player_proc.stdin.flush()
-                ok += 1
-            except BrokenPipeError:
-                break
-            time.sleep(delay)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        try:
-            player_proc.stdin.close()
-        except Exception:
-            pass
-        player_proc.terminate()
-    print(f"  结束：成功 {ok} 帧，跳过 {bad} 帧")
+        import numpy   # noqa: F401
+        import pygame  # noqa: F401
+    except ImportError as e:
+        print(f"  （缺 {e.name}：pip3 install pygame numpy；或加 --noinput 用只看模式）")
+        run_ffplay(adb, w, h, args.rate, frame_bytes)
+        return
+
+    run_gui(adb, w, h, args.rate, frame_bytes)
 
 
 if __name__ == "__main__":
