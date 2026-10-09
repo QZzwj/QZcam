@@ -69,10 +69,13 @@ class TouchInjector:
         self.down = None   # (x, y) 按下点（面板坐标）
 
     def _send(self, cmd):
+        # 注意尾巴上的 sleep：实测 adb 会话一关，板上 shell 会被立刻拆掉，
+        # echo 的数据还没交给 uitap 就丢了（症状：退出码 0 但界面没反应）。
+        # 留 0.5s 让写入落地。板上实测：不带 sleep 无效，带 sleep 生效。
         try:
             subprocess.run([self.adb, "shell",
-                            "echo '%s' > /tmp/qz-touch.fifo" % cmd],
-                           capture_output=True, timeout=5)
+                            "echo '%s' > /tmp/qz-touch.fifo; sleep 0.5" % cmd],
+                           capture_output=True, timeout=8)
         except Exception:
             pass
 
@@ -90,10 +93,13 @@ class TouchInjector:
         end = self._map(px, py, win_w, win_h)
         dx, dy = end[0] - self.down[0], end[1] - self.down[1]
         if abs(dx) < 12 and abs(dy) < 12:
-            self._send("tap %d %d" % end)
+            cmd = "tap %d %d" % end
         else:
-            self._send("swipe %d %d %d %d 250" % (self.down[0], self.down[1], end[0], end[1]))
+            cmd = "swipe %d %d %d %d 250" % (self.down[0], self.down[1], end[0], end[1])
         self.down = None
+        # 后台线程发：注入里有 0.5s 的会话保持，别让画面跟着卡半秒
+        import threading
+        threading.Thread(target=self._send, args=(cmd,), daemon=True).start()
 
 
 def grab_frame(adb, tmp):
