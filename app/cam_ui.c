@@ -222,12 +222,10 @@ static void preview_timer(lv_timer_t *timer)
         uint16_t *fb = qzcam_panel_fb_map(&stride_px);
         if (fb && !preview_covered()) {
             /* 真机：相机帧直写 framebuffer（绕过 LVGL），UI 只局部重绘控件。
-             * 只写**预览中段**（顶栏 20px / 底栏 56px 归 LVGL 独占）—— 否则
-             * 相机帧每帧踩掉 LVGL 画的 UI，就是满屏频闪。 */
-            int w = qzcam_cam_frame_w();
-            int top_h = 20, bot_start = qzcam_panel_h - 56;
+             * 这是动效流畅的关键 —— 否则每帧全屏重渲染 + 全屏 SPI 刷写。 */
+            int w = qzcam_cam_frame_w(), h = qzcam_cam_frame_h();
             const uint16_t *src = (const uint16_t *)pixels;
-            for (int y = top_h; y < bot_start; y++)
+            for (int y = 0; y < h; y++)
                 memcpy(fb + (size_t)y * stride_px, src + (size_t)y * w,
                        (size_t)w * 2);
         } else if (!preview_ready) {
@@ -1157,7 +1155,7 @@ rec_capsule = lv_obj_create(screen);
     lv_obj_remove_flag(rec_capsule, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(rec_capsule, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(rec_capsule, 92, 18);
-    lv_obj_align(rec_capsule, LV_ALIGN_TOP_MID, 0, 1);   /* 顶栏内：预览中段的相机直写不会踩它 */
+    lv_obj_align(rec_capsule, LV_ALIGN_TOP_MID, 0, 22);
     lv_obj_set_style_bg_color(rec_capsule, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(rec_capsule, LV_OPA_70, 0);
     lv_obj_set_style_border_width(rec_capsule, 1, 0);
