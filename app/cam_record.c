@@ -304,7 +304,7 @@ static void delete_oldest_video(const char *keep_path)
 {
     DIR *dir = opendir(qzcam_storage_dir());
     if (!dir) return;
-    char oldest_name[128] = "";
+    char oldest_name[256] = "";
     char oldest_full[512] = "";
     struct dirent *item;
     while ((item = readdir(dir)) != NULL) {
