@@ -49,4 +49,11 @@ int qzcam_isp_virtual_height(void);
 void qzcam_isp_apply_settings(void);
 void *qzcam_isp_held_frame(void);
 
+/** ISP 已就绪（rkaiq 已初始化）——界面据此决定是否下发图像参数。 */
+bool qzcam_isp_ready(void);
+
+/** 曝光补偿（-30..+30，即 ±3EV，步长 0.1EV）：缩放 AE 曝光路线的上限，
+ * AE 仍保持自动。没有 rkaiq 时是空操作。 */
+void qzcam_isp_apply_ev(int ev_x10);
+
 #endif

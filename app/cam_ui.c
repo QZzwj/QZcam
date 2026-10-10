@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "cam_core.h"
+#include "cam_isp.h"
 #include "cam_player.h"
 #include "cam_record.h"
 #include "cam_settings.h"
@@ -295,6 +296,13 @@ static void preview_timer(lv_timer_t *timer)
             qzcam_panel_blank(0);
             blanked = false;
         }
+        /* EV 补偿下发 ISP（变化时才发） */
+        static int last_ev = 999;
+        if (qzcam_isp_ready() && ps->ev != last_ev) {
+            qzcam_isp_apply_ev(ps->ev);
+            last_ev = ps->ev;
+        }
+
         /* 时间校准：设置里的时间元组 ≠ 系统时间 → 应用（无 RTC，重启即失） */
         time_t nowt = time(NULL);
         struct tm c;

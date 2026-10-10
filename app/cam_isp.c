@@ -12,6 +12,7 @@
 
 #include "cam_isp.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,8 @@ void qzcam_isp_close(void) {}
 int qzcam_isp_virtual_height(void) { return 0; }
 void qzcam_isp_apply_settings(void) {}
 void *qzcam_isp_held_frame(void) { return NULL; }
+bool qzcam_isp_ready(void) { return false; }
+void qzcam_isp_apply_ev(int ev_x10) { (void)ev_x10; }
 
 const char *qzcam_isp_last_error(void)
 {
@@ -286,6 +289,38 @@ void qzcam_isp_close(void)
 const char *qzcam_isp_last_error(void)
 {
     return last_error[0] ? last_error : "ISP 取景不可用";
+}
+
+bool qzcam_isp_ready(void)
+{
+    return aiq_ctx != NULL;
+}
+
+/* EV 补偿：缩放 AE 的曝光时间路线上限（官方支持的 SetAeRangeEn 机制），
+ * AE 仍保持自动 —— EV+ 时允许更长曝光，EV- 时压短，画面随之变亮/变暗。 */
+void qzcam_isp_apply_ev(int ev_x10)
+{
+    if (!aiq_ctx) return;
+    static float base_max_exp = -1.0f;   /* 第一次调用时记下 IQ 的默认路线 */
+
+    Uapi_ExpSwAttrV2_t attr;
+    if (rk_aiq_user_api2_ae_getExpSwAttr(aiq_ctx, &attr) != XCAM_RETURN_NO_ERROR)
+        return;
+
+    if (base_max_exp < 0)
+        base_max_exp = attr.stAdvanced.SetLinAeRange.stExpTimeRange.Max;
+
+    float factor = powf(2.0f, ev_x10 / 20.0f);       /* ±3EV → ×0.125..×8 */
+    if (factor > 8.0f) factor = 8.0f;
+    if (factor < 0.125f) factor = 0.125f;
+
+    attr.stAdvanced.enable = true;
+    attr.stAdvanced.SetAeRangeEn = true;
+    attr.stAdvanced.SetLinAeRange.stExpTimeRange.Max = base_max_exp * factor;
+    if (attr.stAdvanced.SetLinAeRange.stExpTimeRange.Max < 0.0001f)
+        attr.stAdvanced.SetLinAeRange.stExpTimeRange.Max = 0.0001f;
+
+    rk_aiq_user_api2_ae_setExpSwAttr(aiq_ctx, attr);
 }
 
 #endif /* !QZCAM_HAVE_MEDIA */
