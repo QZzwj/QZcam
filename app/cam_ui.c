@@ -342,6 +342,21 @@ static void preview_timer(lv_timer_t *timer)
     }
     prev_rec_active = rec_now;
 
+    /* 录制中剩余空间告警：按当前码率折算剩余可录时间，<5 分钟提示一次 */
+    if (rec_now) {
+        static bool warned_5min;
+        unsigned long long free_b = qzcam_storage_free_bytes();
+        double mbps = (double)qzcam_panel_w * qzcam_panel_h * 2.0 * settings.rec_fps / 1048576.0;
+        double minutes = mbps > 0 ? (double)free_b / 1048576.0 / mbps / 60.0 : 999;
+        if (!warned_5min && minutes < 5.0 && minutes > 0) {
+            char text[96];
+            snprintf(text, sizeof(text), "剩余可录约 %d 分钟", (int)minutes);
+            toast(text);
+            warned_5min = true;
+        }
+        if (minutes >= 5.0) warned_5min = false;
+    }
+
     /* 录制状态胶囊：呼吸红点（1s 正弦明暗，状态指示）+ 等宽计时 */
     if (qzcam_rec_active()) {
         int seconds = qzcam_rec_seconds();
