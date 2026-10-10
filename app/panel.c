@@ -63,7 +63,7 @@ void qzcam_panel_init(void)
 
 /* ---- 背光 / 息屏 ----------------------------------------------------- */
 
-/* pct: 30..100 → 写 /sys/class/backlight/*/brightness（按 max 折算）。
+/* pct: 30..100 → 写背光 sysfs 的 brightness 节点（按 max 折算）。
  * 没有背光节点（模拟器/驱动不支持）时静默忽略。 */
 void qzcam_panel_set_backlight(int pct)
 {
