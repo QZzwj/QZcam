@@ -475,10 +475,30 @@ static inline uint16_t yuv_to_rgb565(int y, int u, int v)
 
 /* NV12/YUYV → 面板尺寸 RGB565（最近邻缩放）。ISP 出的帧比面板大得多，缩放这
  * 一步是必须的；不做插值是为了省掉一帧 7 万多次的浮点乘除。 */
+/* 列采样映射表：sx 只跟 x 有关，逐像素做除法太浪费（每帧 7 万次 32 位除法）。
+ * 捕获/面板尺寸变了才重建。 */
+static int *sx_lut;
+static int sx_lut_panel_w = -1;
+static int sx_lut_cap_w = -1;
+
+static void rebuild_sx_lut(void)
+{
+    if (!sx_lut || sx_lut_panel_w != panel_w) {
+        free(sx_lut);
+        sx_lut = malloc(sizeof(int) * (size_t)panel_w);
+        sx_lut_panel_w = panel_w;
+    }
+    for (int x = 0; x < panel_w; x++)
+        sx_lut[x] = x * cap_w / panel_w;
+    sx_lut_cap_w = cap_w;
+}
+
 static void convert_frame(const uint8_t *data)
 {
     int index = pick_buffer();
     uint8_t *dst = frames[index];
+
+    if (sx_lut_cap_w != cap_w || sx_lut_panel_w != panel_w) rebuild_sx_lut();
 
     if (pixel_format == V4L2_PIX_FMT_NV12) {
         const uint8_t *y_plane = data;
@@ -489,9 +509,8 @@ static void convert_frame(const uint8_t *data)
             const uint8_t *uvrow = uv_plane + (size_t)(sy / 2) * (size_t)cap_stride;
             uint16_t *orow = (uint16_t *)(dst + (size_t)y * (size_t)panel_w * 2);
             for (int x = 0; x < panel_w; x++) {
-                int sx = x * cap_w / panel_w;
-                int sx_even = sx & ~1;
-                orow[x] = yuv_to_rgb565(yrow[sx], uvrow[sx_even], uvrow[sx_even + 1]);
+                int sx = sx_lut[x];
+                orow[x] = yuv_to_rgb565(yrow[sx], uvrow[sx & ~1], uvrow[(sx & ~1) + 1]);
             }
         }
     } else {
@@ -500,7 +519,7 @@ static void convert_frame(const uint8_t *data)
             const uint8_t *row = data + (size_t)sy * (size_t)cap_stride;
             uint16_t *orow = (uint16_t *)(dst + (size_t)y * (size_t)panel_w * 2);
             for (int x = 0; x < panel_w; x++) {
-                int sx = (x * cap_w / panel_w) & ~1;
+                int sx = sx_lut[x] & ~1;
                 const uint8_t *p = row + (size_t)sx * 2;
                 orow[x] = yuv_to_rgb565(p[0], p[1], p[3]);
             }

@@ -1381,7 +1381,7 @@ flash = lv_obj_create(screen);
     apply_overlays();
     update_mode_ui();
     update_storage_label();
-    lv_timer_create(preview_timer, 33, NULL);
+    lv_timer_create(preview_timer, 30, NULL);   /* 与 LV_DEF_REFR_PERIOD 对齐：错拍会造成预览忽快忽慢 */
     lv_timer_create(clock_timer, 1000, NULL);
     clock_timer(NULL);
 
