@@ -1010,10 +1010,13 @@ bool qzcam_cam_snapshot(char *path, unsigned path_size)
         if (raw) qzcam_image_jpeg(original, raw, w, h, s.jpeg_quality);
         free(raw);
     }
+    unsigned long long t0 = monotonic_ms();
     bool ok = qzcam_image_enhance(nv12, w, h, &s);
     uint8_t *rgb = ok ? qzcam_image_rgb(nv12, w, h, &s) : NULL;
     free(nv12);
     ok = rgb && qzcam_image_jpeg(tmp, rgb, w, h, s.jpeg_quality) && rename(tmp, file) == 0;
+    fprintf(stderr, "QZcam: 照片 %dx%d 增强+JPEG 编码耗时 %llu ms\n",
+            w, h, monotonic_ms() - t0);
     if (ok) {
         char thumb[340];
         snprintf(thumb, sizeof(thumb), "%s.thumb.jpg", file);
