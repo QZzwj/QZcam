@@ -676,6 +676,7 @@ static void *worker_main(void *argument)
 
     while (!should_stop()) {
         if (source == SRC_ISP) {
+            qzcam_isp_apply_settings();
             int w = 0, h = 0, stride = 0;
             const uint8_t *nv12 = qzcam_isp_grab(&w, &h, &stride, 500);
             if (nv12) {
@@ -996,7 +997,7 @@ bool qzcam_cam_snapshot(char *path, unsigned path_size)
     time_t now = time(NULL);
     struct tm parts;
     localtime_r(&now, &parts);
-    char name[96], file[320], tmp[328], original[328];
+    char name[96], file[320], tmp[340], original[340];
     static unsigned serial;
     snprintf(name, sizeof(name), "IMG_%04d%02d%02d_%02d%02d%02d_%06u.jpg",
              parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,

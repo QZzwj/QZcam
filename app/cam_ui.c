@@ -269,6 +269,16 @@ static void preview_timer(lv_timer_t *timer)
         lv_label_set_text_fmt(photo_label, "照片 %d", photos);
     }
 
+    /* 录制自动停止（写失败/空间不足）→ 提示原因并刷新相册 */
+    static bool prev_rec_active;
+    bool rec_now = qzcam_rec_active();
+    if (prev_rec_active && !rec_now) {
+        const char *reason = qzcam_rec_stop_reason();
+        if (reason[0]) toast(reason);
+        gallery_refresh();
+    }
+    prev_rec_active = rec_now;
+
     /* 录制状态胶囊：呼吸红点（1s 正弦明暗，状态指示）+ 等宽计时 */
     if (qzcam_rec_active()) {
         int seconds = qzcam_rec_seconds();

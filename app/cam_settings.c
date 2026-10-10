@@ -45,7 +45,6 @@ static qzcam_settings_t settings = {
 
     .watermark = false,
     .auto_off = 0,      /* 从不 */
-    .burst_count = 1,
     .timelapse_ms = 1000,
     .slow_factor = 2,
     .enhancement = 1,
@@ -99,7 +98,6 @@ void qzcam_settings_reset(void)
 
     d.watermark = false;
     d.auto_off = 0;
-    d.burst_count = 1;
     d.timelapse_ms = 1000;
     d.slow_factor = 2;
     d.enhancement = 1;
@@ -154,8 +152,6 @@ static const set_entry_t set_entries[] = {
     { "auto_off",      NULL,                    &settings.auto_off,   0, 300 },
     { "selfie_sec",    NULL,                    &settings.selfie_sec, 0,  10 },
     { "burst",         NULL,                    &settings.burst,      1,  10 },
-    { "photo_delay", NULL, &settings.photo_delay, 0, 10 },
-    { "burst_count", NULL, &settings.burst_count, 1, 10 },
     { "timelapse_ms", NULL, &settings.timelapse_ms, 500, 10000 },
     { "slow_factor", NULL, &settings.slow_factor, 2, 3 },
     { "enhancement", NULL, &settings.enhancement, 0, 3 },

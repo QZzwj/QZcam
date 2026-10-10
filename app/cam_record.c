@@ -1,10 +1,12 @@
 #include "cam_record.h"
 
+#include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "cam_storage.h"
 #include "qzcam.h"
@@ -47,6 +49,7 @@ static unsigned long long bytes_written;
 static unsigned long long started_ms;
 static unsigned long long last_frame_ms;
 static char file_path[240];
+static char stop_reason[96];      /* 非人为停止的原因（写失败/空间不足），UI 弹提示 */
 
 static index_entry_t *index_entries;
 static uint32_t index_count;
@@ -167,7 +170,7 @@ static void write_header(void)
 
 /* -------------------------------------------------------------- 单帧写入 */
 
-static void write_frame(const uint8_t *rgb565, int w, int h)
+static int write_frame(const uint8_t *rgb565, int w, int h)
 {
     uint32_t size = (uint32_t)w * (uint32_t)h * 2u;
     long chunk_start = tell(fp);
@@ -175,10 +178,10 @@ static void write_frame(const uint8_t *rgb565, int w, int h)
     write_fourcc("00dc");
     write_u32(size);
 
-    /* DIB 是自下而上：整行倒着写 */
+    /* DIB 是自下而上：整行倒着写。任何一次写失败都返回 0（= 存储出问题了） */
     const uint8_t *row = rgb565 + (size_t)(h - 1) * (size_t)w * 2u;
     for (int y = 0; y < h; y++) {
-        fwrite(row, 1, (size_t)w * 2u, fp);
+        if (fwrite(row, 1, (size_t)w * 2u, fp) != (size_t)w * 2u) return 0;
         row -= (size_t)w * 2u;
     }
     if (size & 1u) fputc(0, fp);        /* 4 字节对齐的填充（这里尺寸总是偶数，保险起见） */
@@ -190,6 +193,7 @@ static void write_frame(const uint8_t *rgb565, int w, int h)
     }
     frame_count++;
     bytes_written += size + 8;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ 对外 */
@@ -212,27 +216,11 @@ bool qzcam_rec_start(char *path, unsigned path_size)
         return false;
     }
 
-    time_t now = time(NULL);
-    struct tm parts;
-    localtime_r(&now, &parts);
-    snprintf(file_path, sizeof(file_path), "%s/VID_%04d%02d%02d_%02d%02d%02d.avi",
-             qzcam_storage_dir(), parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
-             parts.tm_hour, parts.tm_min, parts.tm_sec);
-
-    fp = fopen(file_path, "wb");
-    if (!fp) {
+    stop_reason[0] = '\0';
+    if (!open_segment_locked()) {
         pthread_mutex_unlock(&lock);
         return false;
     }
-
-    if (!index_entries) index_entries = malloc(sizeof(index_entry_t) * MAX_FRAMES);
-    index_count = 0;
-    frame_count = 0;
-    bytes_written = 0;
-    started_ms = monotonic_ms();
-    last_frame_ms = 0;
-
-    write_header();
     active = true;
     pthread_mutex_unlock(&lock);
 
@@ -240,16 +228,11 @@ bool qzcam_rec_start(char *path, unsigned path_size)
     return true;
 }
 
-void qzcam_rec_stop(void)
+/* 收尾当前段：写 idx1 + 回填长度 + 关文件（持锁调用） */
+static void finalize_locked(void)
 {
-    pthread_mutex_lock(&lock);
-    if (!active) {
-        pthread_mutex_unlock(&lock);
-        return;
-    }
-    active = false;
+    if (!fp) return;
 
-    /* idx1 索引 */
     long idx_start = tell(fp);
     write_fourcc("idx1");
     write_u32(index_count * 16u);
@@ -261,7 +244,6 @@ void qzcam_rec_stop(void)
     }
     long end = tell(fp);
 
-    /* 回填各处长度 */
     fseek(fp, riff_size_pos, SEEK_SET);
     write_u32((uint32_t)(end - 8));
     fseek(fp, movi_size_pos, SEEK_SET);
@@ -270,11 +252,69 @@ void qzcam_rec_stop(void)
     write_u32(frame_count);
     fseek(fp, strh_length_pos, SEEK_SET);
     write_u32(frame_count);
+    fflush(fp);
     fseek(fp, end, SEEK_SET);
 
     fclose(fp);
     fp = NULL;
+}
+
+/* 开新段：生成时间戳文件名 + 写头 + 清零计数（持锁调用）。1 = 成功 */
+static int open_segment_locked(void)
+{
+    time_t now = time(NULL);
+    struct tm parts;
+    localtime_r(&now, &parts);
+    snprintf(file_path, sizeof(file_path), "%s/VID_%04d%02d%02d_%02d%02d%02d.avi",
+             qzcam_storage_dir(), parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
+             parts.tm_hour, parts.tm_min, parts.tm_sec);
+
+    fp = fopen(file_path, "wb");
+    if (!fp) return 0;
+
+    if (!index_entries) index_entries = malloc(sizeof(index_entry_t) * MAX_FRAMES);
+    index_count = 0;
+    frame_count = 0;
+    bytes_written = 0;
+    started_ms = monotonic_ms();
+    last_frame_ms = 0;
+
+    write_header();
+    return 1;
+}
+
+void qzcam_rec_stop(void)
+{
+    pthread_mutex_lock(&lock);
+    if (!active) {
+        pthread_mutex_unlock(&lock);
+        return;
+    }
+    active = false;
+    finalize_locked();
     pthread_mutex_unlock(&lock);
+}
+
+/* 循环覆盖：删掉最旧的一段录像（文件名时间戳字典序 = 时间序），
+ * 跳过当前正在写的文件。 */
+static void delete_oldest_video(const char *keep_path)
+{
+    DIR *dir = opendir(qzcam_storage_dir());
+    if (!dir) return;
+    char oldest_name[128] = "";
+    char oldest_full[512] = "";
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (!strstr(item->d_name, ".avi")) continue;
+        if (!oldest_name[0] || strcmp(item->d_name, oldest_name) < 0) {
+            snprintf(oldest_name, sizeof(oldest_name), "%s", item->d_name);
+            snprintf(oldest_full, sizeof(oldest_full), "%s/%s",
+                     qzcam_storage_dir(), item->d_name);
+        }
+    }
+    closedir(dir);
+    if (oldest_name[0] && strcmp(oldest_full, keep_path) != 0)
+        unlink(oldest_full);
 }
 
 bool qzcam_rec_active(void)
@@ -291,6 +331,11 @@ int qzcam_rec_seconds(void)
     int seconds = active ? (int)((monotonic_ms() - started_ms) / 1000ULL) : 0;
     pthread_mutex_unlock(&lock);
     return seconds;
+}
+
+const char *qzcam_rec_stop_reason(void)
+{
+    return stop_reason[0] ? stop_reason : "";
 }
 
 int qzcam_rec_frames(void)
@@ -326,6 +371,39 @@ void qzcam_rec_submit(const uint8_t *rgb565, int w, int h)
     }
     last_frame_ms = now;
 
-    if (w == width && h == height) write_frame(rgb565, w, h);
+    if (w == width && h == height) {
+        if (!write_frame(rgb565, w, h)) {
+            /* 写失败 = 存储出问题：立刻收尾本段并停，别让坏文件继续长大 */
+            finalize_locked();
+            active = false;
+            snprintf(stop_reason, sizeof(stop_reason), "写入失败（卡满/卡拔出？）录像已保存");
+            pthread_mutex_unlock(&lock);
+            return;
+        }
+
+        /* 循环录像：到分段时长换新文件；空间紧张时按设置覆盖最旧段 */
+        const qzcam_settings_t *st = qzcam_settings();
+        unsigned loop_sec = (unsigned)(st->loop_seconds > 0 ? st->loop_seconds : 0);
+        if (loop_sec && (now - started_ms) / 1000ULL >= loop_sec) {
+            finalize_locked();
+            if (qzcam_storage_free_bytes() < (150ULL << 20)) {
+                if (st->loop_overwrite) {
+                    delete_oldest_video(file_path);
+                } else {
+                    active = false;
+                    snprintf(stop_reason, sizeof(stop_reason),
+                             "存储空间不足（<150MB），录像已停止");
+                    pthread_mutex_unlock(&lock);
+                    return;
+                }
+            }
+            if (!open_segment_locked()) {
+                active = false;
+                snprintf(stop_reason, sizeof(stop_reason), "新分段创建失败，录像已停止");
+                pthread_mutex_unlock(&lock);
+                return;
+            }
+        }
+    }
     pthread_mutex_unlock(&lock);
 }

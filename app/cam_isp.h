@@ -46,5 +46,7 @@ void qzcam_isp_close(void);
 /** 最近一次失败原因（一行，可直接显示在界面上）。 */
 const char *qzcam_isp_last_error(void);
 int qzcam_isp_virtual_height(void);
+void qzcam_isp_apply_settings(void);
+void *qzcam_isp_held_frame(void);
 
 #endif

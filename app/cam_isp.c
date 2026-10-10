@@ -39,6 +39,8 @@ const uint8_t *qzcam_isp_grab(int *width, int *height, int *stride, int timeout_
 void qzcam_isp_release(void) {}
 void qzcam_isp_close(void) {}
 int qzcam_isp_virtual_height(void) { return 0; }
+void qzcam_isp_apply_settings(void) {}
+void *qzcam_isp_held_frame(void) { return NULL; }
 
 const char *qzcam_isp_last_error(void)
 {
@@ -51,6 +53,10 @@ const char *qzcam_isp_last_error(void)
 #include "rk_mpi_sys.h"
 #include "rk_mpi_vi.h"
 #include "rkaiq/uAPI2/rk_aiq_user_api2_sysctl.h"
+#include "rkaiq/uAPI2/rk_aiq_user_api2_imgproc.h"
+#include "rkaiq/uAPI2/rk_aiq_user_api2_ae.h"
+#include "qzcam.h"
+#include <math.h>
 
 #define ISP_CAM_ID   0
 #define ISP_VI_DEV   0
@@ -63,6 +69,8 @@ static bool frame_held;
 static bool mpi_inited;
 static bool vi_inited;
 static char last_error[224];
+static qzcam_settings_t applied_settings;
+static bool settings_applied;
 
 static void set_error(const char *text)
 {
@@ -187,6 +195,8 @@ bool qzcam_isp_open(int width, int height)
     vi_inited = true;
 
     fprintf(stderr, "QZcam: VI %dx%d NV12 已开流\n", width, height);
+    settings_applied = false;
+    qzcam_isp_apply_settings();
     return true;
 
 fail_mpi:
@@ -228,6 +238,31 @@ void qzcam_isp_release(void)
 }
 
 int qzcam_isp_virtual_height(void) { return frame_held ? (int)held_frame.stVFrame.u32VirHeight : 0; }
+void *qzcam_isp_held_frame(void) { return frame_held ? &held_frame : NULL; }
+
+void qzcam_isp_apply_settings(void)
+{
+    if (!aiq_ctx) return;
+    qzcam_settings_t s = *qzcam_settings();
+    bool first = !settings_applied;
+    if (first || s.wb_mode != applied_settings.wb_mode || s.wb_kelvin != applied_settings.wb_kelvin) {
+        rk_aiq_uapi2_setWBMode(aiq_ctx, s.wb_mode ? OP_MANUAL : OP_AUTO);
+        static const unsigned temperature[] = {5500, 5500, 6500, 3200};
+        if (s.wb_mode) rk_aiq_uapi2_setMWBCT(aiq_ctx, s.wb_mode < 4 ? temperature[s.wb_mode] : (unsigned)s.wb_kelvin);
+    }
+    if (first || s.sharpness != applied_settings.sharpness)
+        rk_aiq_uapi2_setSharpness(aiq_ctx, (unsigned)s.sharpness);
+    if (first || s.denoise != applied_settings.denoise || s.isp_denoise != applied_settings.isp_denoise) {
+        unsigned strength = s.isp_denoise ? (unsigned)(s.isp_denoise * 25) : (unsigned)s.denoise;
+        rk_aiq_uapi2_setMSpaNRStrth(aiq_ctx, strength > 0, strength);
+        rk_aiq_uapi2_setMTNRStrth(aiq_ctx, strength > 0, strength / 2);
+    }
+    if (first || s.wdr != applied_settings.wdr || s.night_mode != applied_settings.night_mode) {
+        rk_aiq_uapi2_setDrcGain(aiq_ctx, s.wdr ? 2.0f : 1.0f, 0.2f, 16.0f);
+        rk_aiq_uapi2_setDrcLocalTMO(aiq_ctx, s.wdr ? 0.5f : 0.2f, 0.1f, s.night_mode ? 0.8f : 0.2f);
+    }
+    applied_settings = s; settings_applied = true;
+}
 
 void qzcam_isp_close(void)
 {

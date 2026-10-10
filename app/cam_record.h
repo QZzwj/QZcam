@@ -31,6 +31,9 @@ int qzcam_rec_frames(void);
 /** 已写入字节数。 */
 unsigned long long qzcam_rec_bytes(void);
 
+/** 非人为停止的原因（写失败/空间不足），没发生过自动停止时是空串。 */
+const char *qzcam_rec_stop_reason(void);
+
 /** 送一帧（面板尺寸 RGB565）。不录时是空操作。 */
 void qzcam_rec_submit(const uint8_t *rgb565, int w, int h);
 

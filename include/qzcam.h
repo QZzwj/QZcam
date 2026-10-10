@@ -64,8 +64,6 @@ typedef struct {
     /* ---- 通用 ---- */
     bool watermark;    /**< 日期水印 */
     int auto_off;      /**< 自动关机：0=从不，否则秒（60/180/300） */
-    int photo_delay;   /**< 0/3/5/10 seconds */
-    int burst_count;   /**< 1/3/5/10 photos */
     int timelapse_ms;  /**< Interval between recorded frames */
     int slow_factor;   /**< Playback slowdown: 2 or 3 */
     int enhancement;   /**< 0=off 1=natural 2=detail 3=low light */
