@@ -346,7 +346,7 @@ static void preview_timer(lv_timer_t *timer)
     if (rec_now) {
         static bool warned_5min;
         unsigned long long free_b = qzcam_storage_free_bytes();
-        double mbps = (double)qzcam_panel_w * qzcam_panel_h * 2.0 * settings.rec_fps / 1048576.0;
+        double mbps = (double)qzcam_panel_w * qzcam_panel_h * 2.0 * qzcam_settings()->rec_fps / 1048576.0;
         double minutes = mbps > 0 ? (double)free_b / 1048576.0 / mbps / 60.0 : 999;
         if (!warned_5min && minutes < 5.0 && minutes > 0) {
             char text[96];
