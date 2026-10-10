@@ -47,6 +47,7 @@ add_executable(qzcam
     app/cam_record.c
     app/cam_settings.c
     app/cam_ui.c
+    app/cam_image.c
 )
 target_include_directories(qzcam PRIVATE include app)
 target_link_libraries(qzcam PRIVATE lvgl lvgl::thorvg m pthread stdc++)
@@ -75,6 +76,11 @@ if(QZCAM_MEDIA_DIR)
     target_link_directories(qzcam PRIVATE "${QZCAM_MEDIA_DIR}/lib")
     # 顺序有讲究：rockit/mpp 在前（rkaiq 的 3A 回调会用到它们），rkaiq 在后
     target_link_libraries(qzcam PRIVATE rockit rockchip_mpp rkaiq rga)
+    set(QZCAM_JPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../SDK/project/app/component/third_libs" CACHE PATH "SDK JPEG package")
+    target_include_directories(qzcam PRIVATE "${QZCAM_JPEG_ROOT}/include/libjpeg9")
+    target_link_directories(qzcam PRIVATE "${QZCAM_JPEG_ROOT}/lib/arm-rockchip830-linux-uclibcgnueabihf")
+    target_link_libraries(qzcam PRIVATE jpeg rkmuxer)
+    target_compile_definitions(qzcam PRIVATE QZCAM_HAVE_JPEG=1)
     message(STATUS "QZcam: ISP 取景已启用，媒体库目录 ${QZCAM_MEDIA_DIR}")
 else()
     message(STATUS "QZcam: 未提供 QZCAM_MEDIA_DIR —— cam_isp 走桩（模拟器/无 Rockchip 库构建）")
@@ -82,6 +88,11 @@ endif()
 
 if(QZCAM_SIMULATOR)
     target_link_libraries(qzcam PRIVATE SDL2::SDL2)
+    find_package(JPEG QUIET)
+    if(JPEG_FOUND)
+        target_link_libraries(qzcam PRIVATE JPEG::JPEG)
+        target_compile_definitions(qzcam PRIVATE QZCAM_HAVE_JPEG=1)
+    endif()
 endif()
 
 message(STATUS "QZcam: 面板兜底 ${QZCAM_PANEL_W}x${QZCAM_PANEL_H}，模拟器=${QZCAM_SIMULATOR}")

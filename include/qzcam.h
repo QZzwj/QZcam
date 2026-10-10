@@ -31,6 +31,8 @@ typedef struct {
     int brightness; /**< -50..50 */
     int contrast;   /**< 50..150，100 = 原始对比 */
     int fps;        /**< 取景帧率上限，5..30 */
+    int selfie_sec; /**< 定时自拍：0=关 3/5/10 秒倒计时 */
+    int burst;      /**< 连拍张数：1=单张 3/5/10 张 */
 
     /* ---- 模式与录制（SC3336 上限 2304x1296@30fps） ---- */
     int mode;          /**< 0=视频 1=照片 2=慢动作 3=延时 4=循环 */
@@ -62,6 +64,21 @@ typedef struct {
     /* ---- 通用 ---- */
     bool watermark;    /**< 日期水印 */
     int auto_off;      /**< 自动关机：0=从不，否则秒（60/180/300） */
+    int photo_delay;   /**< 0/3/5/10 seconds */
+    int burst_count;   /**< 1/3/5/10 photos */
+    int timelapse_ms;  /**< Interval between recorded frames */
+    int slow_factor;   /**< Playback slowdown: 2 or 3 */
+    int enhancement;   /**< 0=off 1=natural 2=detail 3=low light */
+    int local_contrast;/**< 0..100, luminance CLAHE blend */
+    int jpeg_quality;  /**< 60..100 */
+    bool keep_original;/**< Save an unenhanced JPEG alongside the photo */
+    bool motion_detect;
+    int motion_sensitivity;
+    int motion_hold;   /**< Seconds after last motion */
+    int screen_brightness;
+    int screen_timeout;
+    bool remote_enabled;
+    bool playback_loop;
 } qzcam_settings_t;
 
 /** 全局参数（带默认值，见 cam_settings.c）。 */

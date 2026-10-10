@@ -94,6 +94,12 @@ static lv_obj_t *mode_cards[5];
 static lv_obj_t *settings_page;
 
 static lv_timer_t *toast_timer;
+
+/* 自拍倒计时 / 连拍状态机 */
+static lv_obj_t *countdown_label;
+static lv_timer_t *capture_timer;
+static int step_mode;    /* 0=空闲 1=自拍倒计时 2=连拍中 */
+static int step_left;
 static bool settings_dirty;
 
 static void sheet_slide_in(lv_obj_t *sheet);
@@ -333,14 +339,65 @@ static void player_close_cb(lv_event_t *event)
     player_stop();
 }
 
-static void player_toggle_cb(lv_event_t *event)
+/* 渲染指定帧（seek 后也要能看到画面，暂停时同样有效） */
+static void player_render_at(int frame)
 {
-    (void)event;
-    player_playing = !player_playing;   /* 点画面 = 暂停/继续 */
-    if (player_playing && player_timer)
-        lv_timer_resume(player_timer);
-    else if (player_timer)
-        lv_timer_pause(player_timer);
+    qzcam_player_seek_frame(frame);
+    const uint8_t *f = qzcam_player_next_frame();
+    if (!f) return;
+    player_dsc.data = f;
+    lv_image_set_src(player_image, &player_dsc);
+    lv_obj_invalidate(player_image);
+
+    int cur = qzcam_player_frame_index();
+    int total = player_total;
+    lv_bar_set_value(player_bar, total ? (int32_t)(cur * 100 / total) : 0, LV_ANIM_OFF);
+    lv_label_set_text_fmt(player_time, "%02d:%02d / %02d:%02d",
+                          cur / 60 / qzcam_player_fps(), cur / qzcam_player_fps() % 60,
+                          total / 60 / qzcam_player_fps(), total / qzcam_player_fps() % 60);
+}
+
+/* 点击播放器画面：左 1/3 快退 5s，中 1/3 暂停/继续，右 1/3 快进 5s */
+static void player_area_cb(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    lv_area_t a;
+    lv_obj_get_coords(player_screen, &a);
+    int rel = p.x - a.x1;
+    int w = a.x2 - a.x1;
+    int fps = qzcam_player_fps() > 0 ? qzcam_player_fps() : 15;
+
+    if (rel < w / 3) {
+        player_render_at(qzcam_player_frame_index() - 5 * fps);
+    } else if (rel > w - w / 3) {
+        player_render_at(qzcam_player_frame_index() + 5 * fps);
+    } else {
+        player_playing = !player_playing;
+        if (player_playing && player_timer)
+            lv_timer_resume(player_timer);
+        else if (player_timer)
+            lv_timer_pause(player_timer);
+    }
+}
+
+/* 进度条点击定位：把点击 x 换算成帧号 */
+static void player_seek_strip_cb(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_area_t a;
+    lv_obj_get_coords(player_screen, &a);
+    int rel = p.x - a.x1;
+    int w = a.x2 - a.x1;
+    if (rel < 0) rel = 0;
+    if (rel > w) rel = w;
+    player_render_at((int)((long long)player_total * rel / (w ? w : 1)));
 }
 
 static void player_tick(lv_timer_t *timer)
@@ -350,8 +407,12 @@ static void player_tick(lv_timer_t *timer)
 
     const uint8_t *f = qzcam_player_next_frame();
     if (!f) {
-        player_stop();                   /* 播完自动回相册 */
-        return;
+        qzcam_player_seek_frame(0);      /* 循环播放；要停用“返回” */
+        f = qzcam_player_next_frame();
+        if (!f) {
+            player_stop();
+            return;
+        }
     }
     player_dsc.data = f;
     lv_image_set_src(player_image, &player_dsc);   /* 每帧重设：换了 data 不重设，v9 不会重画 */
@@ -619,6 +680,9 @@ static void mode_cb(lv_event_t *event)
     persist();
 }
 
+static void capture_one_photo(void);
+static void photo_step_tick(lv_timer_t *timer);
+
 static void shutter_cb(lv_event_t *event)
 {
     (void)event;
@@ -644,6 +708,28 @@ static void shutter_cb(lv_event_t *event)
     }
 
     /* 拍照 */
+    const qzcam_settings_t *ps = qzcam_settings();
+    if (capture_timer) return;              /* 倒计时/连拍进行中，忽略快门 */
+
+    if (ps->selfie_sec > 0) {               /* 定时自拍：先倒计时 */
+        step_mode = 1;
+        step_left = ps->selfie_sec;
+        capture_timer = lv_timer_create(photo_step_tick, 1000, NULL);
+        return;
+    }
+    if (ps->burst > 1) {                    /* 连拍：首张立刻，后续定时 */
+        capture_one_photo();
+        step_mode = 2;
+        step_left = ps->burst - 1;
+        capture_timer = lv_timer_create(photo_step_tick, 350, NULL);
+        return;
+    }
+    capture_one_photo();
+}
+
+/* 单张拍摄：白闪 + 存图 + 提示（自拍/连拍/普通拍照共用） */
+static void capture_one_photo(void)
+{
     lv_obj_set_style_opa(flash, LV_OPA_60, 0);
     lv_timer_create(flash_off, 110, NULL);
 
@@ -656,6 +742,44 @@ static void shutter_cb(lv_event_t *event)
         toast(qzcam_cam_status());
     }
     update_storage_label();
+}
+
+/* 自拍倒计时 / 连拍的节拍器 */
+static void photo_step_tick(lv_timer_t *timer)
+{
+    if (step_mode == 1) {
+        if (step_left > 0) {
+            lv_label_set_text_fmt(countdown_label, "%d", step_left);
+            lv_obj_remove_flag(countdown_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(countdown_label);
+            step_left--;
+            return;
+        }
+        lv_obj_add_flag(countdown_label, LV_OBJ_FLAG_HIDDEN);
+        const qzcam_settings_t *ps = qzcam_settings();
+        if (ps->burst > 1) {                /* 倒计时结束 → 继续连拍 */
+            step_mode = 2;
+            step_left = ps->burst;
+            lv_timer_set_period(timer, 350);
+            return;
+        }
+        capture_one_photo();
+        lv_timer_del(timer);
+        capture_timer = NULL;
+        step_mode = 0;
+        return;
+    }
+
+    /* 连拍：每 350ms 一张 */
+    capture_one_photo();
+    step_left--;
+    if (step_left <= 0) {
+        lv_timer_del(timer);
+        capture_timer = NULL;
+        step_mode = 0;
+        toast("连拍完成");
+        gallery_refresh();
+    }
 }
 
 /* 按压反馈：按下瞬间缩到 0.92，松开弹回（skills/animate：按钮反馈 100~160ms） */
@@ -968,6 +1092,10 @@ static const int cycle_loop[]  = { 60, 180, 300, 600 };
 static const char *const cycle_loop_names[]  = { "1min", "3min", "5min", "10min" };
 static const int cycle_off[]   = { 0, 60, 180, 300 };
 static const char *const cycle_off_names[]   = { "从不", "1min", "3min", "5min" };
+static const int cycle_selfie[] = { 0, 3, 5, 10 };
+static const char *const cycle_selfie_names[] = { "关", "3秒", "5秒", "10秒" };
+static const int cycle_burst[]  = { 1, 3, 5, 10 };
+static const char *const cycle_burst_names[]  = { "单张", "3张", "5张", "10张" };
 
 static void cycle_row_cb(lv_event_t *event)
 {
@@ -1058,6 +1186,9 @@ static void build_settings(lv_obj_t *screen)
 
     qzcam_settings_t *s = qzcam_settings();
     int y = 4;
+    make_group_header(list, y, "拍摄"); y += 16;
+    make_cycle_row(list, y, "定时自拍", &s->selfie_sec, cycle_selfie, cycle_selfie_names, 4); y += 26;
+    make_cycle_row(list, y, "连拍张数", &s->burst, cycle_burst, cycle_burst_names, 4); y += 26;
     make_group_header(list, y, "录制"); y += 16;
     make_cycle_row(list, y, "分辨率", &s->resolution, cycle_res, cycle_res_names, 3); y += 26;
     make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 3); y += 26;
@@ -1156,7 +1287,16 @@ static void build_gallery(lv_obj_t *screen)
     lv_obj_set_style_radius(player_screen, 0, 0);
     lv_obj_set_style_pad_all(player_screen, 0, 0);
     lv_obj_add_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(player_screen, player_toggle_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(player_screen, player_area_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 进度条的点击热区（条本身只有 4px 高，专门给一层 20px 的透明点击条） */
+    lv_obj_t *seek_strip = lv_obj_create(player_screen);
+    lv_obj_remove_flag(seek_strip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(seek_strip, qzcam_panel_w, 22);
+    lv_obj_align(seek_strip, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_set_style_bg_opa(seek_strip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(seek_strip, 0, 0);
+    lv_obj_add_event_cb(seek_strip, player_seek_strip_cb, LV_EVENT_CLICKED, NULL);
 
     player_image = lv_image_create(player_screen);
     lv_obj_set_size(player_image, qzcam_panel_w, qzcam_panel_h);
@@ -1371,6 +1511,11 @@ flash = lv_obj_create(screen);
     lv_obj_set_style_border_width(flash, 0, 0);
     lv_obj_set_style_radius(flash, 0, 0);
     lv_obj_set_style_opa(flash, LV_OPA_TRANSP, 0);
+
+    /* 自拍倒计时的大数字（创建在 flash 之后 = 盖在一切之上） */
+    countdown_label = make_label(screen, "", 56, COLOR_ACCENT);
+    lv_obj_align(countdown_label, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(countdown_label, LV_OBJ_FLAG_HIDDEN);
 
     build_drawer(screen);
     build_modes(screen);

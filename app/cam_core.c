@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "cam_isp.h"
+#include "cam_image.h"
 #include "cam_record.h"
 #include "cam_settings.h"
 #include "qzcam.h"
@@ -46,6 +47,7 @@ static int vfd = -1;
 static bool use_mplane;
 static uint32_t pixel_format;
 static int cap_w, cap_h, cap_stride;
+static int cap_uv_h;
 static capture_buffer_t cap_buffers[CAPTURE_BUFFERS];
 static unsigned cap_count;
 
@@ -72,6 +74,42 @@ static unsigned long long last_frame_ms;
 static double fps_value;
 static unsigned long long fps_window_start;
 static unsigned fps_window_frames;
+static pthread_mutex_t snapshot_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t snapshot_cond = PTHREAD_COND_INITIALIZER;
+static bool snapshot_pending;
+static uint8_t *snapshot_nv12;
+static int snapshot_w, snapshot_h;
+
+static void snapshot_capture(const uint8_t *data)
+{
+    pthread_mutex_lock(&lock);
+    if (snapshot_pending) {
+        int w = cap_w & ~1, h = cap_h & ~1;
+        uint8_t *copy = malloc((size_t)w * h * 3 / 2);
+        if (copy && pixel_format == V4L2_PIX_FMT_NV12) {
+            for (int y = 0; y < h; y++)
+                memcpy(copy + (size_t)y * w, data + (size_t)y * cap_stride, w);
+            const uint8_t *uv = data + (size_t)cap_stride * (cap_uv_h ? cap_uv_h : cap_h);
+            for (int y = 0; y < h / 2; y++)
+                memcpy(copy + (size_t)w * h + (size_t)y * w, uv + (size_t)y * cap_stride, w);
+        } else if (copy) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x += 2) {
+                    const uint8_t *p = data + (size_t)y * cap_stride + x * 2;
+                    copy[y * w + x] = p[0]; copy[y * w + x + 1] = p[2];
+                    if (!(y & 1)) {
+                        int uv = w * h + y / 2 * w + x;
+                        copy[uv] = p[1]; copy[uv + 1] = p[3];
+                    }
+                }
+            }
+        }
+        snapshot_nv12 = copy; snapshot_w = w; snapshot_h = h;
+        snapshot_pending = false;
+        pthread_cond_signal(&snapshot_cond);
+    }
+    pthread_mutex_unlock(&lock);
+}
 
 /* --------------------------------------------------------------- 小工具 */
 
@@ -351,9 +389,9 @@ static bool open_v4l2(void)
         sizes[size_count][1] = h;
         size_count++;
     } else {
-        sizes[size_count][0] = 640;  sizes[size_count][1] = 480;  size_count++;
-        sizes[size_count][0] = 1280; sizes[size_count][1] = 720;  size_count++;
         sizes[size_count][0] = 2304; sizes[size_count][1] = 1296; size_count++;
+        sizes[size_count][0] = 1280; sizes[size_count][1] = 720;  size_count++;
+        sizes[size_count][0] = 640;  sizes[size_count][1] = 480;  size_count++;
     }
 
     /* mainpath 一般只提供多平面接口，但两种都试；格式 NV12 优先、YUYV 兜底。 */
@@ -409,7 +447,10 @@ static bool open_v4l2(void)
  * 裸 V4L2 直取绕过了 3A，图会偏暗/偏绿，甚至一帧不出 —— 所以它只是兜底。 */
 static bool open_isp(void)
 {
-    int w = 640, h = 480;
+    static const int sizes[3][2] = {{2304,1296}, {1920,1080}, {1280,720}};
+    int resolution = qzcam_settings()->resolution;
+    if (resolution < 0 || resolution > 2) resolution = 0;
+    int w = sizes[resolution][0], h = sizes[resolution][1];
     const char *capture = getenv("QZCAM_CAPTURE");
     int cw = 0, chh = 0;
     if (capture && sscanf(capture, "%dx%d", &cw, &chh) == 2 && cw > 0 && chh > 0) {
@@ -434,6 +475,7 @@ static bool open_isp(void)
  * 那才是根因）。 */
 static bool open_any(void)
 {
+    cap_uv_h = 0;
     if (open_isp()) {
         source = SRC_ISP;
         return true;
@@ -495,6 +537,7 @@ static void rebuild_sx_lut(void)
 
 static void convert_frame(const uint8_t *data)
 {
+    snapshot_capture(data);
     int index = pick_buffer();
     uint8_t *dst = frames[index];
 
@@ -502,7 +545,7 @@ static void convert_frame(const uint8_t *data)
 
     if (pixel_format == V4L2_PIX_FMT_NV12) {
         const uint8_t *y_plane = data;
-        const uint8_t *uv_plane = data + (size_t)cap_stride * (size_t)cap_h;
+        const uint8_t *uv_plane = data + (size_t)cap_stride * (size_t)(cap_uv_h ? cap_uv_h : cap_h);
         for (int y = 0; y < panel_h; y++) {
             int sy = y * cap_h / panel_h;
             const uint8_t *yrow = y_plane + (size_t)sy * (size_t)cap_stride;
@@ -563,6 +606,24 @@ static void render_fake_frame(void)
         0xF800, 0xFC00, 0xFFE0, 0x07E0, 0x07FF, 0x001F, 0xF81F, 0xFFFF,
     };
     tick++;
+    pthread_mutex_lock(&lock);
+    if (snapshot_pending) {
+        static const int sizes[3][2] = {{2304,1296}, {1920,1080}, {1280,720}};
+        int res = qzcam_settings()->resolution;
+        if (res < 0 || res > 2) res = 0;
+        int w = sizes[res][0], h = sizes[res][1];
+        snapshot_nv12 = malloc((size_t)w * h * 3 / 2);
+        snapshot_w = w; snapshot_h = h;
+        if (snapshot_nv12) {
+            memset(snapshot_nv12 + w * h, 128, (size_t)w * h / 2);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    snapshot_nv12[y * w + x] = (uint8_t)(40 + x * 140 / w + (((x / 16) ^ (y / 16)) & 1) * 40);
+        }
+        snapshot_pending = false;
+        pthread_cond_signal(&snapshot_cond);
+    }
+    pthread_mutex_unlock(&lock);
 
     int index = pick_buffer();
     uint16_t *dst = (uint16_t *)frames[index];
@@ -622,6 +683,7 @@ static void *worker_main(void *argument)
                     cap_w = w;
                     cap_h = h;
                     cap_stride = stride;
+                    cap_uv_h = qzcam_isp_virtual_height();
                     convert_frame(nv12);
                 }
                 qzcam_isp_release();
@@ -911,41 +973,59 @@ static bool write_bmp(const char *path, const uint8_t *rgb565, int w, int h)
 
 bool qzcam_cam_snapshot(char *path, unsigned path_size)
 {
-    if (!scratch) {
-        set_status("取景未启动，无法拍照");
-        return false;
-    }
-
+    pthread_mutex_lock(&snapshot_lock);
     pthread_mutex_lock(&lock);
-    int index = latest_index;
-    if (index >= 0) memcpy(scratch, frames[index], (size_t)panel_w * (size_t)panel_h * 2);
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 3;
+    snapshot_pending = true;
+    while (snapshot_pending && running) {
+        if (pthread_cond_timedwait(&snapshot_cond, &lock, &deadline) == ETIMEDOUT) break;
+    }
+    snapshot_pending = false;
+    uint8_t *nv12 = snapshot_nv12;
+    snapshot_nv12 = NULL;
+    int w = snapshot_w, h = snapshot_h;
     pthread_mutex_unlock(&lock);
-
-    if (index < 0) {
-        set_status("还没有可保存的帧");
+    if (!nv12) {
+        set_status("无法获取高清帧，请检查相机信号");
+        pthread_mutex_unlock(&snapshot_lock);
         return false;
     }
-
+    qzcam_settings_t s = *qzcam_settings();
     time_t now = time(NULL);
     struct tm parts;
     localtime_r(&now, &parts);
-    char name[64];
-    snprintf(name, sizeof(name), "IMG_%04d%02d%02d_%02d%02d%02d.bmp",
+    char name[96], file[320], tmp[328], original[328];
+    static unsigned serial;
+    snprintf(name, sizeof(name), "IMG_%04d%02d%02d_%02d%02d%02d_%06u.jpg",
              parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
-             parts.tm_hour, parts.tm_min, parts.tm_sec);
-
-    char file[240];
+             parts.tm_hour, parts.tm_min, parts.tm_sec, ++serial);
     snprintf(file, sizeof(file), "%s/%s", qzcam_settings_photo_dir(), name);
-
-    if (!write_bmp(file, scratch, panel_w, panel_h)) {
-        set_status("写文件失败（磁盘满或只读）");
-        return false;
+    snprintf(tmp, sizeof(tmp), "%s.part", file);
+    if (s.keep_original && s.enhancement) {
+        uint8_t *raw = qzcam_image_rgb(nv12, w, h, &s);
+        snprintf(original, sizeof(original), "%s.original.jpg", file);
+        if (raw) qzcam_image_jpeg(original, raw, w, h, s.jpeg_quality);
+        free(raw);
     }
-
+    bool ok = qzcam_image_enhance(nv12, w, h, &s);
+    uint8_t *rgb = ok ? qzcam_image_rgb(nv12, w, h, &s) : NULL;
+    free(nv12);
+    ok = rgb && qzcam_image_jpeg(tmp, rgb, w, h, s.jpeg_quality) && rename(tmp, file) == 0;
+    if (ok) {
+        char thumb[340];
+        snprintf(thumb, sizeof(thumb), "%s.thumb.jpg", file);
+        qzcam_image_thumb(thumb, rgb, w, h);
+    } else {
+        unlink(tmp);
+        set_status("照片保存失败（内存不足、磁盘满或只读）");
+    }
+    free(rgb);
     pthread_mutex_lock(&lock);
-    photo_count++;
+    if (ok) photo_count++;
     pthread_mutex_unlock(&lock);
-
-    if (path && path_size) snprintf(path, path_size, "%s", file);
-    return true;
+    pthread_mutex_unlock(&snapshot_lock);
+    if (ok && path && path_size) snprintf(path, path_size, "%s", file);
+    return ok;
 }

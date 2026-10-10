@@ -79,7 +79,7 @@ double qzcam_cam_fps(void);
 /** 本次启动以来拍下的照片数。 */
 int qzcam_cam_photos(void);
 
-/** 把最近一帧存成 24 位 BMP（路径写进 path）。失败原因写进 qzcam_cam_status()。 */
+/** Capture the next native frame, enhance and save JPEG; call from a task thread. */
 bool qzcam_cam_snapshot(char *path, unsigned path_size);
 
 #endif

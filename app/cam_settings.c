@@ -17,6 +17,8 @@ static qzcam_settings_t settings = {
     .brightness = 0,
     .contrast = 100,
     .fps = 15,
+    .selfie_sec = 0,
+    .burst = 1,
 
     .mode = 1,          /* 照片优先：开机即可拍 */
     .resolution = 0,    /* 2304x1296（传感器原生） */
@@ -43,6 +45,15 @@ static qzcam_settings_t settings = {
 
     .watermark = false,
     .auto_off = 0,      /* 从不 */
+    .burst_count = 1,
+    .timelapse_ms = 1000,
+    .slow_factor = 2,
+    .enhancement = 1,
+    .local_contrast = 25,
+    .jpeg_quality = 95,
+    .motion_sensitivity = 50,
+    .motion_hold = 10,
+    .screen_brightness = 80,
 };
 
 qzcam_settings_t *qzcam_settings(void)
@@ -60,6 +71,8 @@ void qzcam_settings_reset(void)
     d.brightness = 0;
     d.contrast = 100;
     d.fps = 15;
+    d.selfie_sec = 0;
+    d.burst = 1;
 
     d.mode = 1;
     d.resolution = 0;
@@ -86,6 +99,15 @@ void qzcam_settings_reset(void)
 
     d.watermark = false;
     d.auto_off = 0;
+    d.burst_count = 1;
+    d.timelapse_ms = 1000;
+    d.slow_factor = 2;
+    d.enhancement = 1;
+    d.local_contrast = 25;
+    d.jpeg_quality = 95;
+    d.motion_sensitivity = 50;
+    d.motion_hold = 10;
+    d.screen_brightness = 80;
 
     settings = d;
 }
@@ -130,11 +152,33 @@ static const set_entry_t set_entries[] = {
     { "audio_denoise", &settings.audio_denoise, NULL,               0,   1 },
     { "watermark",     &settings.watermark,     NULL,               0,   1 },
     { "auto_off",      NULL,                    &settings.auto_off,   0, 300 },
+    { "selfie_sec",    NULL,                    &settings.selfie_sec, 0,  10 },
+    { "burst",         NULL,                    &settings.burst,      1,  10 },
+    { "photo_delay", NULL, &settings.photo_delay, 0, 10 },
+    { "burst_count", NULL, &settings.burst_count, 1, 10 },
+    { "timelapse_ms", NULL, &settings.timelapse_ms, 500, 10000 },
+    { "slow_factor", NULL, &settings.slow_factor, 2, 3 },
+    { "enhancement", NULL, &settings.enhancement, 0, 3 },
+    { "local_contrast", NULL, &settings.local_contrast, 0, 100 },
+    { "jpeg_quality", NULL, &settings.jpeg_quality, 60, 100 },
+    { "keep_original", &settings.keep_original, NULL, 0, 1 },
+    { "motion_detect", &settings.motion_detect, NULL, 0, 1 },
+    { "motion_sensitivity", NULL, &settings.motion_sensitivity, 1, 100 },
+    { "motion_hold", NULL, &settings.motion_hold, 3, 60 },
+    { "screen_brightness", NULL, &settings.screen_brightness, 5, 100 },
+    { "screen_timeout", NULL, &settings.screen_timeout, 0, 300 },
+    { "remote_enabled", &settings.remote_enabled, NULL, 0, 1 },
+    { "playback_loop", &settings.playback_loop, NULL, 0, 1 },
 };
 
 /* 落盘位置：能写哪里放哪里（oem 挂载后最稳，userdata 小，tmp 重启丢） */
 static bool settings_path(char *out, size_t size)
 {
+    const char *override = getenv("QZCAM_SETTINGS");
+    if (override && override[0]) {
+        snprintf(out, size, "%s", override);
+        return true;
+    }
     static const char *dirs[] = { "/oem/usr/etc", "/userdata", "/tmp" };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         char probe[288];

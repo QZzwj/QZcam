@@ -38,6 +38,7 @@ const uint8_t *qzcam_isp_grab(int *width, int *height, int *stride, int timeout_
 
 void qzcam_isp_release(void) {}
 void qzcam_isp_close(void) {}
+int qzcam_isp_virtual_height(void) { return 0; }
 
 const char *qzcam_isp_last_error(void)
 {
@@ -225,6 +226,8 @@ void qzcam_isp_release(void)
     RK_MPI_VI_ReleaseChnFrame(ISP_VI_PIPE, ISP_VI_CHN, &held_frame);
     frame_held = false;
 }
+
+int qzcam_isp_virtual_height(void) { return frame_held ? (int)held_frame.stVFrame.u32VirHeight : 0; }
 
 void qzcam_isp_close(void)
 {
