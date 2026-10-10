@@ -1,6 +1,7 @@
 #include "cam_ui.h"
 
 #include <dirent.h>
+#include <unistd.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -319,7 +320,92 @@ typedef struct {
     char name[80];
     unsigned long long size;
     bool video;
+    int viewer_idx;     /* 照片在查看器清单里的序号（左右切换用） */
 } gallery_entry_t;
+
+/* 查看器左右切换的照片清单（gallery_refresh 时快照） */
+static char viewer_paths[50][260];
+static int viewer_count;
+static int viewer_idx;
+
+static void gallery_refresh(void);
+
+/* 查看器点按：左 1/3 上一张，右 1/3 下一张 */
+static void viewer_tap_cb(lv_event_t *event)
+{
+    (void)event;
+    if (viewer_count == 0) return;
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_area_t a;
+    lv_obj_get_coords(viewer, &a);
+    int rel = p.x - a.x1;
+    int w = a.x2 - a.x1;
+    if (rel < w / 3)
+        viewer_idx = (viewer_idx - 1 + viewer_count) % viewer_count;
+    else if (rel > w - w / 3)
+        viewer_idx = (viewer_idx + 1) % viewer_count;
+    else
+        return;
+    char path[280];
+    snprintf(path, sizeof(path), "A:%.258s", viewer_paths[viewer_idx]);
+    lv_image_set_src(viewer_image, path);
+    lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_invalidate(viewer_image);
+}
+
+/* 单条删除（列表行右侧的“删”按钮） */
+static void gallery_delete_cb(lv_event_t *event)
+{
+    gallery_entry_t *entry = (gallery_entry_t *)lv_event_get_user_data(event);
+    if (!entry) return;
+    char full[512];
+    snprintf(full, sizeof(full), "%s/%s", qzcam_storage_dir(), entry->name);
+    unlink(full);
+    toast("已删除");
+    gallery_refresh();
+}
+
+/* 清空（两段式确认：第一次点变红“确认?”，3 秒内再点才真删） */
+static lv_obj_t *wipe_btn;
+static bool wipe_armed;
+static void wipe_disarm(lv_timer_t *timer)
+{
+    wipe_armed = false;
+    lv_obj_set_style_bg_color(wipe_btn, COLOR_CARD_2, 0);
+    lv_label_set_text(lv_obj_get_child(wipe_btn, 0), "清空");
+    lv_timer_del(timer);
+}
+static void gallery_wipe_cb(lv_event_t *event)
+{
+    (void)event;
+    if (!wipe_armed) {
+        wipe_armed = true;
+        lv_obj_set_style_bg_color(wipe_btn, COLOR_REC, 0);
+        lv_label_set_text(lv_obj_get_child(wipe_btn, 0), "确认?");
+        lv_timer_create(wipe_disarm, 3000, NULL);
+        return;
+    }
+    wipe_armed = false;
+    DIR *dir = opendir(qzcam_storage_dir());
+    if (dir) {
+        struct dirent *item;
+        while ((item = readdir(dir)) != NULL) {
+            if (strstr(item->d_name, ".avi") || strstr(item->d_name, ".bmp")) {
+                char full[512];
+                snprintf(full, sizeof(full), "%s/%s", qzcam_storage_dir(), item->d_name);
+                unlink(full);
+            }
+        }
+        closedir(dir);
+    }
+    lv_obj_set_style_bg_color(wipe_btn, COLOR_CARD_2, 0);
+    lv_label_set_text(lv_obj_get_child(wipe_btn, 0), "清空");
+    toast("已清空");
+    gallery_refresh();
+}
 
 static void gallery_close_cb(lv_event_t *event)
 {
@@ -474,6 +560,7 @@ static void gallery_item_cb(lv_event_t *event)
         return;
     }
     /* 照片：全屏看（LVGL 自带 BMP 解码 + FS_STDIO，路径用 A: 前缀） */
+    viewer_idx = entry->viewer_idx;
     lv_image_set_src(viewer_image, path);
     lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_CENTER);
     lv_obj_remove_flag(viewer, LV_OBJ_FLAG_HIDDEN);
@@ -529,24 +616,57 @@ static void gallery_refresh(void)
     }
     qsort(entries, (size_t)count, sizeof(gallery_entry_t), compare_entry_desc);
 
+    viewer_count = 0;
+    char last_date[16] = "";
+    int y = 2;
     for (int i = 0; i < count; i++) {
+        const char *nm = entries[i].name;
+
+        /* 按日期分组：IMG_/VID_ 名字第 5~12 字节就是日期 */
+        if ((strstr(nm, "IMG_") == nm || strstr(nm, "VID_") == nm) && strlen(nm) >= 12) {
+            char date[16];
+            snprintf(date, sizeof(date), "%.4s-%.2s-%.2s", nm + 4, nm + 8, nm + 10);
+            if (strcmp(date, last_date) != 0) {
+                lv_obj_t *h = make_label(gallery_list, date, 11, COLOR_DIM);
+                lv_obj_set_pos(h, 8, y);
+                y += 18;
+                snprintf(last_date, sizeof(last_date), "%s", date);
+            }
+        }
+
+        /* 照片收进查看器清单（左右切换用） */
+        if (!entries[i].video && viewer_count < 50) {
+            snprintf(viewer_paths[viewer_count], sizeof(viewer_paths[viewer_count]),
+                     "%s/%s", qzcam_storage_dir(), nm);
+            entries[i].viewer_idx = viewer_count++;
+        }
+
         char text[200];
-        /* 图标字形在中文字体里没有，用中文标签代替（符号字体只对 ASCII 图标有效） */
-        snprintf(text, sizeof(text), "%s %.60s  %.1f%s",
-                 entries[i].video ? "影" : "图",
-                 entries[i].name,
+        snprintf(text, sizeof(text), "%s %.44s  %.1f%s",
+                 entries[i].video ? "影" : "图", nm,
                  entries[i].size >= (1u << 20) ? (double)entries[i].size / (double)(1u << 20) : (double)entries[i].size / 1024.0,
                  entries[i].size >= (1u << 20) ? "MB" : "KB");
 
         lv_obj_t *row = lv_button_create(gallery_list);
         lv_obj_set_size(row, qzcam_panel_w - 16, 26);
-        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, i * 28);
+        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, y);
+        y += 28;
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x1A1A20), 0);
         lv_obj_set_style_pad_all(row, 0, 0);
         lv_obj_t *label = make_label(row, text, 12, COLOR_TEXT);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 6, 0);
         lv_obj_add_event_cb(row, gallery_item_cb, LV_EVENT_CLICKED, &entries[i]);
+
+        /* 单条删除：行右侧“删”小按钮（子按钮点击不会触发行打开） */
+        lv_obj_t *del = lv_button_create(row);
+        lv_obj_set_size(del, 36, 20);
+        lv_obj_align(del, LV_ALIGN_RIGHT_MID, -4, 0);
+        lv_obj_set_style_bg_color(del, lv_color_hex(0x3A2020), 0);
+        lv_obj_set_style_pad_all(del, 0, 0);
+        lv_obj_t *dlabel = make_label(del, "删", 11, lv_color_hex(0xFF8888));
+        lv_obj_center(dlabel);
+        lv_obj_add_event_cb(del, gallery_delete_cb, LV_EVENT_CLICKED, &entries[i]);
     }
 }
 
@@ -1258,6 +1378,12 @@ static void build_gallery(lv_obj_t *screen)
     storage_label = make_label(bar, "", 9, COLOR_DIM);
     lv_obj_align(storage_label, LV_ALIGN_RIGHT_MID, -64, 0);
 
+    /* 清空（两段式确认） */
+    wipe_btn = make_button(bar, "清空", 48, 20, 6);
+    lv_obj_align(wipe_btn, LV_ALIGN_LEFT_MID, 56, 0);
+    lv_obj_set_style_bg_color(wipe_btn, COLOR_CARD_2, 0);
+    lv_obj_add_event_cb(wipe_btn, gallery_wipe_cb, LV_EVENT_CLICKED, NULL);
+
     gallery_list = lv_obj_create(gallery);
     lv_obj_set_size(gallery_list, qzcam_panel_w, qzcam_panel_h - 24);
     lv_obj_set_pos(gallery_list, 0, 24);
@@ -1282,6 +1408,7 @@ static void build_gallery(lv_obj_t *screen)
     viewer_image = lv_image_create(viewer);
     lv_obj_set_size(viewer_image, qzcam_panel_w, qzcam_panel_h);
     lv_obj_set_pos(viewer_image, 0, 0);
+    lv_obj_add_event_cb(viewer, viewer_tap_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *back = make_button(viewer, "返回", 52, 22, 6);
     lv_obj_align(back, LV_ALIGN_TOP_RIGHT, -6, 6);
