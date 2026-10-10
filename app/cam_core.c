@@ -515,8 +515,15 @@ static inline uint16_t yuv_to_rgb565(int y, int u, int v)
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
-/* NV12/YUYV → 面板尺寸 RGB565（最近邻缩放）。ISP 出的帧比面板大得多，缩放这
- * 一步是必须的；不做插值是为了省掉一帧 7 万多次的浮点乘除。 */
+/* NV12/YUYV → 面板尺寸 RGB565。
+ *
+ * 缩放这一步是必须的（2304x1296 → 320x240 是 7.2x5.4 倍），而且**必须做区域平均**：
+ * 单点最近邻等于丢掉了 96% 的像素，丢掉的那些就变成混叠噪点 —— 屏上看着又糊又脏
+ * （实测：把同一张 1296p 图按这两种方式缩到 320x180，最近邻的"高频能量"里绝大
+ * 部分是假细节，纸张上的字被切碎，面积平均能读、最近邻读不出来）。
+ *
+ * 折中：3x3 取样平均（方块内均匀三点 x 均匀三行）。9 次字节读/像素，30fps 下约
+ * 20M 次/秒，A7 吃得下，混叠基本消掉。 */
 /* 列采样映射表：sx 只跟 x 有关，逐像素做除法太浪费（每帧 7 万次 32 位除法）。
  * 捕获/面板尺寸变了才重建。 */
 static int *sx_lut;
@@ -546,14 +553,31 @@ static void convert_frame(const uint8_t *data)
     if (pixel_format == V4L2_PIX_FMT_NV12) {
         const uint8_t *y_plane = data;
         const uint8_t *uv_plane = data + (size_t)cap_stride * (size_t)(cap_uv_h ? cap_uv_h : cap_h);
+        /* 取样步长：方块边长 / 3（至少 1），三点取在方块内的 0、中、末附近 */
+        int dy = cap_h / panel_h / 3; if (dy < 1) dy = 1;
+        int dx = cap_w / panel_w / 3; if (dx < 1) dx = 1;
+
         for (int y = 0; y < panel_h; y++) {
-            int sy = y * cap_h / panel_h;
-            const uint8_t *yrow = y_plane + (size_t)sy * (size_t)cap_stride;
+            int sy = y * cap_h / panel_h + dy;          /* 取方块中间那行当 UV 参考 */
+            int sy0 = sy - dy, sy1 = sy, sy2 = sy + dy;
+            if (sy0 < 0) sy0 = 0;
+            if (sy2 > cap_h - 1) sy2 = cap_h - 1;
+            const uint8_t *r0 = y_plane + (size_t)sy0 * (size_t)cap_stride;
+            const uint8_t *r1 = y_plane + (size_t)sy1 * (size_t)cap_stride;
+            const uint8_t *r2 = y_plane + (size_t)sy2 * (size_t)cap_stride;
             const uint8_t *uvrow = uv_plane + (size_t)(sy / 2) * (size_t)cap_stride;
             uint16_t *orow = (uint16_t *)(dst + (size_t)y * (size_t)panel_w * 2);
+
             for (int x = 0; x < panel_w; x++) {
-                int sx = sx_lut[x];
-                orow[x] = yuv_to_rgb565(yrow[sx], uvrow[sx & ~1], uvrow[(sx & ~1) + 1]);
+                int sx = sx_lut[x] + dx;
+                int x0 = sx - dx, x1 = sx, x2 = sx + dx;
+                if (x0 < 0) x0 = 0;
+                if (x2 > cap_w - 1) x2 = cap_w - 1;
+                int ysum = r0[x0] + r0[x1] + r0[x2]
+                         + r1[x0] + r1[x1] + r1[x2]
+                         + r2[x0] + r2[x1] + r2[x2];
+                int uvx = x1 & ~1;
+                orow[x] = yuv_to_rgb565(ysum / 9, uvrow[uvx], uvrow[uvx + 1]);
             }
         }
     } else {

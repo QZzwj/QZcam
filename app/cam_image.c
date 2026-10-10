@@ -277,23 +277,67 @@ bool qzcam_image_decode_jpeg_rgb565(const char *path, uint8_t *out, int out_w, i
                 else                                     fw = out_h * dw / dh;  /* 源更高 */
                 int ox = (out_w - fw) / 2, oy = (out_h - fh) / 2;
 
-                memset(out, 0, (size_t)out_w * (size_t)out_h * 2);
-                ok = true;
-                for (int ty = 0; ty < fh && ok; ty++) {
-                    int sy = ty * dh / fh;              /* 目标行 → 源行（最近邻） */
-                    while ((int)c.output_scanline <= sy) {
-                        JSAMPROW rp = row;
-                        if (jpeg_read_scanlines(&c, &rp, 1) != 1) break;
+                /* 缩小时做**区域平均**而不是单点取样：单点会把丢掉的那些像素
+                 * 变成混叠噪点（屏上看着糊且脏）。这里是一次性的事（一张照片一次），
+                 * 所以直接上完整方块平均，不做取样折中。 */
+                int *acc = malloc(sizeof(int) * (size_t)fw * 3);
+                int *cnt = malloc(sizeof(int) * (size_t)fw);
+                if (acc && cnt) {
+                    memset(out, 0, (size_t)out_w * (size_t)out_h * 2);
+                    ok = true;
+                    for (int ty = 0; ty < fh && ok; ty++) {
+                        int y0 = ty * dh / fh;
+                        int y1 = (ty + 1) * dh / fh;
+                        if (y1 <= y0) y1 = y0 + 1;
+                        if (y1 > dh) y1 = dh;
+                        for (int tx = 0; tx < fw; tx++) {
+                            int x0 = tx * dw / fw;
+                            int x1 = (tx + 1) * dw / fw;
+                            if (x1 <= x0) x1 = x0 + 1;
+                            if (x1 > dw) x1 = dw;
+                            cnt[tx] = (x1 - x0) * (y1 - y0);
+                            acc[tx * 3] = acc[tx * 3 + 1] = acc[tx * 3 + 2] = 0;
+                        }
+                        for (int sy = y0; sy < y1 && ok; sy++) {
+                            while ((int)c.output_scanline <= sy) {
+                                JSAMPROW rp = row;
+                                if (jpeg_read_scanlines(&c, &rp, 1) != 1) break;
+                            }
+                            if ((int)c.output_scanline <= sy) { ok = false; break; }
+                            for (int tx = 0; tx < fw; tx++) {
+                                int x0 = tx * dw / fw;
+                                int x1 = (tx + 1) * dw / fw;
+                                if (x1 <= x0) x1 = x0 + 1;
+                                if (x1 > dw) x1 = dw;
+                                const uint8_t *p = row + (size_t)x0 * 3;
+                                int r = 0, g = 0, b = 0;
+                                for (int k = x0; k < x1; k++, p += 3) {
+                                    r += p[0];
+                                    g += p[1];
+                                    b += p[2];
+                                }
+                                acc[tx * 3] += r;
+                                acc[tx * 3 + 1] += g;
+                                acc[tx * 3 + 2] += b;
+                            }
+                        }
+                        if (!ok) break;
+                        uint16_t *dstrow = (uint16_t *)(out +
+                            ((size_t)(oy + ty) * (size_t)out_w + (size_t)ox) * 2);
+                        for (int tx = 0; tx < fw; tx++) {
+                            int n = cnt[tx] > 0 ? cnt[tx] : 1;
+                            unsigned r = (unsigned)(acc[tx * 3] / n);
+                            unsigned g = (unsigned)(acc[tx * 3 + 1] / n);
+                            unsigned b = (unsigned)(acc[tx * 3 + 2] / n);
+                            dstrow[tx] = (uint16_t)(((r & 0xF8) << 8) |
+                                                    ((g & 0xFC) << 3) | (b >> 3));
+                        }
                     }
-                    if ((int)c.output_scanline <= sy) { ok = false; break; }
-                    uint16_t *dstrow =
-                        (uint16_t *)(out + ((size_t)(oy + ty) * (size_t)out_w + (size_t)ox) * 2);
-                    for (int tx = 0; tx < fw; tx++) {
-                        const uint8_t *p = row + (size_t)(tx * dw / fw) * 3;
-                        dstrow[tx] = (uint16_t)(((p[0] & 0xF8) << 8) |
-                                                ((p[1] & 0xFC) << 3) | (p[2] >> 3));
-                    }
+                } else {
+                    ok = false;
                 }
+                free(acc);
+                free(cnt);
             }
             jpeg_finish_decompress(&c);
         }
