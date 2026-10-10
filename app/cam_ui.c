@@ -212,6 +212,7 @@ static void update_storage_label(void)
 
 /* -------------------------------------------------------------- 取景刷新 */
 
+static void gallery_refresh(void);
 static void preview_timer(lv_timer_t *timer)
 {
     (void)timer;

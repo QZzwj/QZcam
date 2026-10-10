@@ -51,6 +51,9 @@ static unsigned long long last_frame_ms;
 static char file_path[240];
 static char stop_reason[96];      /* 非人为停止的原因（写失败/空间不足），UI 弹提示 */
 
+static int open_segment_locked(void);
+static void finalize_locked(void);
+
 static index_entry_t *index_entries;
 static uint32_t index_count;
 static long riff_size_pos, movi_size_pos, movi_data_start;
