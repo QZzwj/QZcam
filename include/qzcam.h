@@ -21,6 +21,12 @@ extern int qzcam_panel_h;
 /** 探测面板尺寸：模拟器读 QZCAM_PANEL（默认 320x240），真机读 QZCAM_FB（默认 /dev/fb0）。 */
 void qzcam_panel_init(void);
 
+/** 背光亮度（30..100%），写 sysfs；无背光节点时忽略。 */
+void qzcam_panel_set_backlight(int pct);
+
+/** 息屏(on=1)/唤醒(on=0)：FBIOBLANK。返回 0 = 驱动支持。 */
+int qzcam_panel_blank(int on);
+
 /** 运行参数。界面上的参数抽屉改的就是这个结构，取景线程每帧读它。 */
 typedef struct {
     /* ---- 叠加与画面（逐像素生效，立即见效） ---- */
@@ -34,6 +40,13 @@ typedef struct {
     int selfie_sec; /**< 定时自拍：0=关 3/5/10 秒倒计时 */
     int burst;      /**< 连拍张数：1=单张 3/5/10 张 */
     int timelapse_interval; /**< 延时摄影采帧间隔：1/2/5/10 秒 */
+    int backlight;  /**< 背光亮度：30..100（%） */
+    int screen_off; /**< 自动息屏：0=从不，否则不操作的秒数（30/60/180） */
+    int t_year;     /**< 时间校准：无 RTC，开机后按这里的值校准系统时间 */
+    int t_mon;      /**< 1..12 */
+    int t_day;      /**< 1..31 */
+    int t_hour;     /**< 0..23 */
+    int t_min;      /**< 0..59 */
 
     /* ---- 模式与录制（SC3336 上限 2304x1296@30fps） ---- */
     int mode;          /**< 0=视频 1=照片 2=慢动作 3=延时 4=循环 */

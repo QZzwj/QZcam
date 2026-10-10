@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "cam_core.h"
@@ -277,6 +278,44 @@ static void preview_timer(lv_timer_t *timer)
         tick = 0;
         lv_label_set_text_fmt(fps_label, "%.1f fps", qzcam_cam_fps());
         update_storage_label();
+
+        /* ---- 背光 / 息屏唤醒 / 时间校准：每 0.5s 巡一遍 ---- */
+        const qzcam_settings_t *ps = qzcam_settings();
+        static int last_bl = -1;
+        if (ps->backlight != last_bl) {
+            qzcam_panel_set_backlight(ps->backlight);
+            last_bl = ps->backlight;
+        }
+        static bool blanked;
+        uint32_t inactive = lv_display_get_inactive_time(NULL);
+        if (ps->screen_off > 0 && !blanked &&
+            inactive > (uint32_t)ps->screen_off * 1000u) {
+            blanked = qzcam_panel_blank(1) == 0;
+        } else if (blanked && inactive < 800) {
+            qzcam_panel_blank(0);
+            blanked = false;
+        }
+        /* 时间校准：设置里的时间元组 ≠ 系统时间 → 应用（无 RTC，重启即失） */
+        time_t nowt = time(NULL);
+        struct tm c;
+        localtime_r(&nowt, &c);
+        if (ps->t_year >= 2024 &&
+            (c.tm_year + 1900 != ps->t_year || c.tm_mon + 1 != ps->t_mon ||
+             c.tm_mday != ps->t_day || c.tm_hour != ps->t_hour ||
+             c.tm_min != ps->t_min)) {
+            struct tm nt;
+            memset(&nt, 0, sizeof(nt));
+            nt.tm_year = ps->t_year - 1900;
+            nt.tm_mon = ps->t_mon - 1;
+            nt.tm_mday = ps->t_day;
+            nt.tm_hour = ps->t_hour;
+            nt.tm_min = ps->t_min;
+            time_t tv = mktime(&nt);
+            if (tv > 0) {
+                struct timeval tvv = { tv, 0 };
+                settimeofday(&tvv, NULL);
+            }
+        }
     }
 
     int photos = qzcam_cam_photos();
@@ -1274,6 +1313,8 @@ static const int cycle_burst[]  = { 1, 3, 5, 10 };
 static const char *const cycle_burst_names[]  = { "单张", "3张", "5张", "10张" };
 static const int cycle_tl[]     = { 1, 2, 5, 10 };
 static const char *const cycle_tl_names[]     = { "1秒", "2秒", "5秒", "10秒" };
+static const int cycle_so[]     = { 0, 30, 60, 180 };
+static const char *const cycle_so_names[]     = { "从不", "30秒", "1分", "5分" };
 
 static void cycle_row_cb(lv_event_t *event)
 {
@@ -1396,6 +1437,16 @@ static void build_settings(lv_obj_t *screen)
     make_switch_row(list, y, "网格线", &s->grid); y += 30;
     make_cycle_row(list, y, "自动关机", &s->auto_off, cycle_off, cycle_off_names, 4); y += 30;
     make_switch_row(list, y, "镜像", &s->mirror); y += 34;
+
+    make_group_header(list, y, "系统"); y += 16;
+    make_slider_row(list, y, "背光亮度", 30, 100, &s->backlight); y += 30;
+    make_cycle_row(list, y, "自动息屏", &s->screen_off, cycle_so, cycle_so_names, 4); y += 26;
+    make_group_header(list, y, "时间校准（无 RTC，重启后按此校准）"); y += 16;
+    make_slider_row(list, y, "年", 2024, 2035, &s->t_year); y += 30;
+    make_slider_row(list, y, "月", 1, 12, &s->t_mon); y += 30;
+    make_slider_row(list, y, "日", 1, 31, &s->t_day); y += 30;
+    make_slider_row(list, y, "时", 0, 23, &s->t_hour); y += 30;
+    make_slider_row(list, y, "分", 0, 59, &s->t_min); y += 34;
 
     lv_obj_t *reset = make_button(list, "恢复默认设置", 120, 24, 10);
     lv_obj_align(reset, LV_ALIGN_TOP_MID, 0, y);

@@ -20,6 +20,13 @@ static qzcam_settings_t settings = {
     .selfie_sec = 0,
     .burst = 1,
     .timelapse_interval = 2,
+    .backlight = 80,
+    .screen_off = 0,
+    .t_year = 2026,
+    .t_mon = 10,
+    .t_day = 10,
+    .t_hour = 12,
+    .t_min = 0,
 
     .mode = 1,          /* 照片优先：开机即可拍 */
     .resolution = 0,    /* 2304x1296（传感器原生） */
@@ -74,6 +81,13 @@ void qzcam_settings_reset(void)
     d.selfie_sec = 0;
     d.burst = 1;
     d.timelapse_interval = 2;
+    d.backlight = 80;
+    d.screen_off = 0;
+    d.t_year = 2026;
+    d.t_mon = 10;
+    d.t_day = 10;
+    d.t_hour = 12;
+    d.t_min = 0;
 
     d.mode = 1;
     d.resolution = 0;
@@ -155,6 +169,13 @@ static const set_entry_t set_entries[] = {
     { "selfie_sec",    NULL,                    &settings.selfie_sec, 0,  10 },
     { "burst",         NULL,                    &settings.burst,      1,  10 },
     { "tl_interval",   NULL,                    &settings.timelapse_interval, 1, 10 },
+    { "backlight",     NULL,                    &settings.backlight, 30, 100 },
+    { "screen_off",    NULL,                    &settings.screen_off, 0, 180 },
+    { "t_year",        NULL,                    &settings.t_year, 2024, 2035 },
+    { "t_mon",         NULL,                    &settings.t_mon,   1,  12 },
+    { "t_day",         NULL,                    &settings.t_day,   1,  31 },
+    { "t_hour",        NULL,                    &settings.t_hour,  0,  23 },
+    { "t_min",         NULL,                    &settings.t_min,   0,  59 },
     { "timelapse_ms", NULL, &settings.timelapse_ms, 500, 10000 },
     { "slow_factor", NULL, &settings.slow_factor, 2, 3 },
     { "enhancement", NULL, &settings.enhancement, 0, 3 },

@@ -1,5 +1,6 @@
 #include "qzcam.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <stdio.h>
@@ -58,4 +59,47 @@ void qzcam_panel_init(void)
     }
 #endif
     fprintf(stderr, "QZcam: 面板 %dx%d\n", qzcam_panel_w, qzcam_panel_h);
+}
+
+/* ---- 背光 / 息屏 ----------------------------------------------------- */
+
+/* pct: 30..100 → 写 /sys/class/backlight/*/brightness（按 max 折算）。
+ * 没有背光节点（模拟器/驱动不支持）时静默忽略。 */
+void qzcam_panel_set_backlight(int pct)
+{
+    if (pct < 30) pct = 30;
+    if (pct > 100) pct = 100;
+    const char *dir = "/sys/class/backlight";
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *item;
+    while ((item = readdir(d)) != NULL) {
+        if (item->d_name[0] == '.') continue;
+        char max_path[160], br_path[160], val[16];
+        snprintf(max_path, sizeof(max_path), "%s/%s/max_brightness", dir, item->d_name);
+        snprintf(br_path, sizeof(br_path), "%s/%s/brightness", dir, item->d_name);
+        FILE *mf = fopen(max_path, "r");
+        if (!mf) continue;
+        int max = 0;
+        if (fscanf(mf, "%d", &max) != 1 || max <= 0) { fclose(mf); continue; }
+        fclose(mf);
+        FILE *bf = fopen(br_path, "w");
+        if (!bf) continue;
+        snprintf(val, sizeof(val), "%d", max * pct / 100);
+        fputs(val, bf);
+        fclose(bf);
+    }
+    closedir(d);
+}
+
+/* 息屏/唤醒：FBIOBLANK。返回 0 = 驱动支持。 */
+int qzcam_panel_blank(int on)
+{
+    const char *device = getenv("QZCAM_FB");
+    if (!device || !device[0]) device = "/dev/fb0";
+    int fd = open(device, O_RDWR);
+    if (fd < 0) return -1;
+    int ok = ioctl(fd, FBIOBLANK, on ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK);
+    close(fd);
+    return ok;
 }
