@@ -19,6 +19,7 @@ static qzcam_settings_t settings = {
     .fps = 15,
     .selfie_sec = 0,
     .burst = 1,
+    .timelapse_interval = 2,
 
     .mode = 1,          /* 照片优先：开机即可拍 */
     .resolution = 0,    /* 2304x1296（传感器原生） */
@@ -72,6 +73,7 @@ void qzcam_settings_reset(void)
     d.fps = 15;
     d.selfie_sec = 0;
     d.burst = 1;
+    d.timelapse_interval = 2;
 
     d.mode = 1;
     d.resolution = 0;
@@ -152,6 +154,7 @@ static const set_entry_t set_entries[] = {
     { "auto_off",      NULL,                    &settings.auto_off,   0, 300 },
     { "selfie_sec",    NULL,                    &settings.selfie_sec, 0,  10 },
     { "burst",         NULL,                    &settings.burst,      1,  10 },
+    { "tl_interval",   NULL,                    &settings.timelapse_interval, 1, 10 },
     { "timelapse_ms", NULL, &settings.timelapse_ms, 500, 10000 },
     { "slow_factor", NULL, &settings.slow_factor, 2, 3 },
     { "enhancement", NULL, &settings.enhancement, 0, 3 },

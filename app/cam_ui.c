@@ -38,7 +38,7 @@
 #define COLOR_OK       lv_color_hex(0x30D158)   /* iOS 绿（开关） */
 #define COLOR_SHUTTER  lv_color_hex(0xFFFFFF)
 
-typedef enum { MODE_PHOTO = 0, MODE_VIDEO } capture_mode_t;
+typedef enum { MODE_PHOTO = 0, MODE_VIDEO, MODE_TIMELAPSE } capture_mode_t;
 
 /* 拍摄模式（settings.mode 的取值与文案），卡片选择器用 */
 static const char *const mode_titles[5] = { "视频", "照片", "慢动作", "延时", "循环" };
@@ -101,6 +101,20 @@ static lv_obj_t *countdown_label;
 static lv_timer_t *capture_timer;
 static int step_mode;    /* 0=空闲 1=自拍倒计时 2=连拍中 */
 static int step_left;
+
+/* 延时摄影：间隔定时器把最新取景帧直写 AVI */
+static lv_timer_t *tl_timer;
+static uint32_t tl_last_id;
+static void tl_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    uint32_t id = 0;
+    const uint8_t *pixels = qzcam_cam_frame(&id);
+    if (pixels && id != tl_last_id) {
+        tl_last_id = id;
+        qzcam_rec_submit_now(pixels, qzcam_panel_w, qzcam_panel_h);
+    }
+}
 static bool settings_dirty;
 
 static void sheet_slide_in(lv_obj_t *sheet);
@@ -689,7 +703,9 @@ static void persist(void)
  * 慢动作/延时/循环 目前按视频处理（采集管线同一套），等 VENC 接入再分化。 */
 static capture_mode_t mode_to_capture(int mode)
 {
-    return (mode == 1) ? MODE_PHOTO : MODE_VIDEO;
+    if (mode == 1) return MODE_PHOTO;
+    if (mode == 3) return MODE_TIMELAPSE;   /* 延时：间隔采帧合成视频 */
+    return MODE_VIDEO;                      /* 视频/慢动作/循环 都按普通录像 */
 }
 
 static void update_mode_ui(void)
@@ -699,7 +715,8 @@ static void update_mode_ui(void)
 
     /* 快门：白环 + 内圆（视频=红，照片=白） */
     if (shutter_core)
-        lv_obj_set_style_bg_color(shutter_core, capture_mode == MODE_VIDEO ? COLOR_REC : COLOR_SHUTTER, 0);
+        lv_obj_set_style_bg_color(shutter_core,
+                              capture_mode == MODE_PHOTO ? COLOR_SHUTTER : COLOR_REC, 0);
 
     /* 模式卡片高亮（选择器开着时才可见） */
     for (int i = 0; i < 5; i++) {
@@ -806,7 +823,8 @@ static void mode_cb(lv_event_t *event)
     (void)event;
     /* 兼容旧入口（自检钩子）：0=拍照 1=录像 */
     qzcam_settings_t *s = qzcam_settings();
-    s->mode = (capture_mode == MODE_VIDEO) ? 1 : 0;
+    s->mode = (capture_mode == MODE_PHOTO) ? 1 :
+              (capture_mode == MODE_TIMELAPSE) ? 3 : 0;
     update_mode_ui();
     persist();
 }
@@ -817,6 +835,33 @@ static void photo_step_tick(lv_timer_t *timer);
 static void shutter_cb(lv_event_t *event)
 {
     (void)event;
+
+    if (capture_mode == MODE_TIMELAPSE) {
+        /* 延时摄影：快门开/停，间隔定时器把取景帧直写 AVI */
+        if (qzcam_rec_active()) {
+            int frames = qzcam_rec_frames();
+            if (tl_timer) { lv_timer_del(tl_timer); tl_timer = NULL; }
+            qzcam_rec_stop();
+            char text[128];
+            snprintf(text, sizeof(text), "延时完成（%d 帧 %.1fMB）",
+                     frames, (double)qzcam_rec_bytes() / (double)(1u << 20));
+            toast(text);
+            gallery_refresh();
+        } else {
+            char path[240];
+            if (qzcam_rec_tl_start(path, sizeof(path), 15)) {
+                tl_last_id = -1;
+                const qzcam_settings_t *pt = qzcam_settings();
+                int interval = pt->timelapse_interval > 0 ? pt->timelapse_interval : 2;
+                tl_timer = lv_timer_create(tl_tick, (uint32_t)interval * 1000, NULL);
+                toast("延时摄影开始");
+            } else {
+                toast("延时启动失败（存储不可写？）");
+            }
+        }
+        update_storage_label();
+        return;
+    }
 
     if (capture_mode == MODE_VIDEO) {
         if (qzcam_rec_active()) {
@@ -1227,6 +1272,8 @@ static const int cycle_selfie[] = { 0, 3, 5, 10 };
 static const char *const cycle_selfie_names[] = { "关", "3秒", "5秒", "10秒" };
 static const int cycle_burst[]  = { 1, 3, 5, 10 };
 static const char *const cycle_burst_names[]  = { "单张", "3张", "5张", "10张" };
+static const int cycle_tl[]     = { 1, 2, 5, 10 };
+static const char *const cycle_tl_names[]     = { "1秒", "2秒", "5秒", "10秒" };
 
 static void cycle_row_cb(lv_event_t *event)
 {
@@ -1320,6 +1367,7 @@ static void build_settings(lv_obj_t *screen)
     make_group_header(list, y, "拍摄"); y += 16;
     make_cycle_row(list, y, "定时自拍", &s->selfie_sec, cycle_selfie, cycle_selfie_names, 4); y += 26;
     make_cycle_row(list, y, "连拍张数", &s->burst, cycle_burst, cycle_burst_names, 4); y += 26;
+    make_cycle_row(list, y, "延时间隔", &s->timelapse_interval, cycle_tl, cycle_tl_names, 4); y += 26;
     make_group_header(list, y, "录制"); y += 16;
     make_cycle_row(list, y, "分辨率", &s->resolution, cycle_res, cycle_res_names, 3); y += 26;
     make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 3); y += 26;

@@ -37,4 +37,10 @@ const char *qzcam_rec_stop_reason(void);
 /** 送一帧（面板尺寸 RGB565）。不录时是空操作。 */
 void qzcam_rec_submit(const uint8_t *rgb565, int w, int h);
 
+/** 开始延时摄影：帧由界面按间隔送入，视频按 out_fps 播放。已在录时返回 false。 */
+bool qzcam_rec_tl_start(char *path, unsigned path_size, int out_fps);
+
+/** 延时摄影送帧：不做抽帧节流，来一帧写一帧。 */
+void qzcam_rec_submit_now(const uint8_t *rgb565, int w, int h);
+
 #endif

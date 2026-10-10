@@ -53,6 +53,7 @@ static char stop_reason[96];      /* 非人为停止的原因（写失败/空间
 
 static int open_segment_locked(void);
 static void finalize_locked(void);
+static int rec_kind;              /* 0=普通录像（submit 抽帧节流） 1=延时摄影（submit_now 直写） */
 
 static index_entry_t *index_entries;
 static uint32_t index_count;
@@ -220,6 +221,7 @@ bool qzcam_rec_start(char *path, unsigned path_size)
     }
 
     stop_reason[0] = '\0';
+    rec_kind = 0;                        /* 普通录像：submit 走抽帧节流 */
     if (!open_segment_locked()) {
         pthread_mutex_unlock(&lock);
         return false;
@@ -339,6 +341,48 @@ int qzcam_rec_seconds(void)
 const char *qzcam_rec_stop_reason(void)
 {
     return stop_reason[0] ? stop_reason : "";
+}
+
+bool qzcam_rec_tl_start(char *path, unsigned path_size, int out_fps)
+{
+    pthread_mutex_lock(&lock);
+    if (active) {
+        pthread_mutex_unlock(&lock);
+        return false;
+    }
+    const qzcam_settings_t *s = qzcam_settings();
+    width = qzcam_panel_w;
+    height = qzcam_panel_h;
+    fps = out_fps > 0 ? out_fps : 15;    /* 延时视频的播放帧率 */
+    if (fps > 30) fps = 30;
+    rec_kind = 1;
+    stop_reason[0] = '\0';
+    if (!open_segment_locked()) {
+        pthread_mutex_unlock(&lock);
+        return false;
+    }
+    active = true;
+    pthread_mutex_unlock(&lock);
+    if (path && path_size) snprintf(path, path_size, "%s", file_path);
+    return true;
+}
+
+void qzcam_rec_submit_now(const uint8_t *rgb565, int w, int h)
+{
+    if (!rgb565) return;
+    pthread_mutex_lock(&lock);
+    if (!active || !fp || rec_kind != 1) {
+        pthread_mutex_unlock(&lock);
+        return;
+    }
+    if (w == width && h == height) {
+        if (!write_frame(rgb565, w, h)) {
+            finalize_locked();
+            active = false;
+            snprintf(stop_reason, sizeof(stop_reason), "写入失败（卡满/卡拔出？）延时已保存");
+        }
+    }
+    pthread_mutex_unlock(&lock);
 }
 
 int qzcam_rec_frames(void)
