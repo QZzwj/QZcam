@@ -75,7 +75,7 @@ void qzcam_panel_set_backlight(int pct)
     struct dirent *item;
     while ((item = readdir(d)) != NULL) {
         if (item->d_name[0] == '.') continue;
-        char max_path[160], br_path[160], val[16];
+        char max_path[320], br_path[320], val[16];
         snprintf(max_path, sizeof(max_path), "%s/%s/max_brightness", dir, item->d_name);
         snprintf(br_path, sizeof(br_path), "%s/%s/brightness", dir, item->d_name);
         FILE *mf = fopen(max_path, "r");
