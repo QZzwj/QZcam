@@ -14,5 +14,6 @@ void qzcam_ui_set_mode(int video);
 /* 自检用入口（供 QZCAM_TEST_* 环境变量驱动，正常用户操作走按钮） */
 void qzcam_ui_open_gallery(void);        /**< 打开相册列表 */
 void qzcam_ui_view_first_photo(void);    /**< 全屏查看最新一张照片 */
+void qzcam_ui_play_first_video(void);    /**< 直接回放最新一段录像（自检用） */
 
 #endif

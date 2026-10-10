@@ -6,11 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 
 #include "cam_core.h"
+#include "cam_image.h"
 #include "cam_isp.h"
 #include "cam_player.h"
 #include "cam_record.h"
@@ -71,7 +73,7 @@ static lv_obj_t *gallery_list;
 static lv_obj_t *viewer;
 static lv_obj_t *viewer_image;
 
-/* 视频播放器（板载 AVI 回放） */
+/* 视频播放器（板载回放：AVI 直读 / MP4 走 VDEC 解码） */
 static lv_obj_t *player_screen;
 static lv_obj_t *player_image;
 static lv_obj_t *player_time;
@@ -342,12 +344,13 @@ static void preview_timer(lv_timer_t *timer)
     }
     prev_rec_active = rec_now;
 
-    /* 录制中剩余空间告警：按当前码率折算剩余可录时间，<5 分钟提示一次 */
+    /* 录制中剩余空间告警：按当前码率（编码录像走 MP4，别再按未压缩 RGB565 估）
+     * 折算剩余可录时间，<5 分钟提示一次 */
     if (rec_now) {
         static bool warned_5min;
         unsigned long long free_b = qzcam_storage_free_bytes();
-        double mbps = (double)qzcam_panel_w * qzcam_panel_h * 2.0 * qzcam_settings()->rec_fps / 1048576.0;
-        double minutes = mbps > 0 ? (double)free_b / 1048576.0 / mbps / 60.0 : 999;
+        double mb_per_min = qzcam_rec_bitrate_kbps() / 8.0 * 60.0 / 1024.0;
+        double minutes = mb_per_min > 0 ? (double)free_b / 1048576.0 / mb_per_min : 999;
         if (!warned_5min && minutes < 5.0 && minutes > 0) {
             char text[96];
             snprintf(text, sizeof(text), "剩余可录约 %d 分钟", (int)minutes);
@@ -406,6 +409,96 @@ static int viewer_idx;
 
 static void gallery_refresh(void);
 
+/* 照片判定。拍照写的是 .jpg（JPEG 全分辨率），.bmp 留给早期/外部文件。
+ * 注意 JPEG 旁边还有两个附件 —— "<名字>.jpg.thumb.jpg"（列表缩略图）和
+ * "<名字>.jpg.original.jpg"（未增强的原图）—— 它们也以 .jpg 结尾，不能当成
+ * 独立照片列出来，否则一张照片会在相册里出现三行。 */
+static bool name_is_photo(const char *name)
+{
+    if (strstr(name, ".jpg.") || strstr(name, ".bmp.")) return false;   /* 附件 */
+    size_t len = strlen(name);
+    if (len <= 4) return false;
+    const char *dot = name + len - 4;
+    return strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".bmp") == 0;
+}
+
+/* 照片的附件（缩略图 + 未增强原图），删照片时一起清掉，别留孤儿 */
+static void unlink_photo_sidecars(const char *path)
+{
+    char side[600];
+    snprintf(side, sizeof(side), "%s.thumb.jpg", path);
+    unlink(side);
+    snprintf(side, sizeof(side), "%s.original.jpg", path);
+    unlink(side);
+}
+
+/* 照片查看用的解码缓冲：面板尺寸的 RGB565，交给 LVGL 当 draw buffer（1:1 贴图）。
+ * 按实际面板尺寸懒分配一次，避免依赖编译期的兜底尺寸。 */
+static uint8_t *viewer_buf;
+static lv_image_dsc_t viewer_dsc;
+
+static uint8_t *viewer_pixels(void)
+{
+    if (!viewer_buf)
+        viewer_buf = malloc((size_t)qzcam_panel_w * (size_t)qzcam_panel_h * 2);
+    return viewer_buf;
+}
+
+/* 显示一张照片：等比缩到整屏（宽高比不合就上下/左右留黑）。
+ *
+ * 别用 lv_image_set_scale() 去缩：LVGL 9.2 的软件缩放里，"放大"（scale > 256）
+ * 是好的，但"缩小"（scale < 256）对**从文件流式解码**的源（JPEG/BMP 都算）一
+ * 个像素都画不出来，实测整屏只剩背景色 —— 看起来就是黑屏。
+ *
+ * 所以比例交给 LV_IMAGE_ALIGN_STRETCH：它按对象尺寸独立缩放 x/y。把对象尺寸按
+ * 源宽高比算好再居中，就等价于"等比缩放 + 留黑"，而且走的是能用那条路。
+ * 源 2304x1296 + 320x240 面板 → 画面框 320x180，上下各留 30 行黑。 */
+static void viewer_show_photo(const char *fs_path)
+{
+    /* 首选：自己解码成面板尺寸（libjpeg 1/4、1/8 缩放解码）。这样缩放是 libjpeg
+     * 做的（质量好、解码量小），LVGL 只负责 1:1 贴图，完全不碰它那条坏掉的
+     * "缩小"路径。 */
+    if (qzcam_image_decode_jpeg_rgb565(fs_path, viewer_pixels(), qzcam_panel_w, qzcam_panel_h)) {
+        viewer_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        viewer_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        viewer_dsc.header.w = (uint32_t)qzcam_panel_w;
+        viewer_dsc.header.h = (uint32_t)qzcam_panel_h;
+        viewer_dsc.header.stride = (uint32_t)qzcam_panel_w * 2;
+        viewer_dsc.data_size = (uint32_t)(qzcam_panel_w * qzcam_panel_h * 2);
+        viewer_dsc.data = viewer_pixels();
+        lv_image_set_src(viewer_image, &viewer_dsc);
+        lv_obj_set_size(viewer_image, qzcam_panel_w, qzcam_panel_h);
+        lv_obj_align(viewer_image, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_invalidate(viewer_image);
+        return;
+    }
+
+    /* 退路（BMP，或没有 libjpeg 的构建）：交给 LVGL 自己解上面的文件。
+     * 别用 lv_image_set_scale 去缩 —— LVGL 9.2 的软件缩放里只有放大管用，
+     * "缩小"（scale < 256）对从文件流式解码的源什么也画不出来（实测整屏黑）。
+     * 所以交给 STRETCH：它按对象尺寸独立缩 x/y，把对象按源宽高比算好再居中，
+     * 等价于"等比缩放 + 留黑"。 */
+    char src[300];
+    snprintf(src, sizeof(src), "A:%.288s", fs_path);
+    lv_image_set_src(viewer_image, src);
+    lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_STRETCH);
+
+    int w = qzcam_panel_w, h = qzcam_panel_h;
+    lv_image_header_t header;
+    if (lv_image_decoder_get_info(src, &header) == LV_RESULT_OK &&
+        header.w > 0 && header.h > 0) {
+        if ((int32_t)header.w * qzcam_panel_h > (int32_t)header.h * qzcam_panel_w)
+            h = qzcam_panel_w * (int)header.h / (int)header.w;   /* 源更宽：宽贴边 */
+        else
+            w = qzcam_panel_h * (int)header.w / (int)header.h;   /* 源更高：高贴边 */
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    lv_obj_set_size(viewer_image, w, h);
+    lv_obj_align(viewer_image, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_invalidate(viewer_image);
+}
+
 /* 查看器点按：左 1/3 上一张，右 1/3 下一张 */
 static void viewer_tap_cb(lv_event_t *event)
 {
@@ -425,11 +518,7 @@ static void viewer_tap_cb(lv_event_t *event)
         viewer_idx = (viewer_idx + 1) % viewer_count;
     else
         return;
-    char path[280];
-    snprintf(path, sizeof(path), "A:%.258s", viewer_paths[viewer_idx]);
-    lv_image_set_src(viewer_image, path);
-    lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_CENTER);
-    lv_obj_invalidate(viewer_image);
+    viewer_show_photo(viewer_paths[viewer_idx]);
 }
 
 /* 单条删除（列表行右侧的“删”按钮） */
@@ -440,6 +529,7 @@ static void gallery_delete_cb(lv_event_t *event)
     char full[512];
     snprintf(full, sizeof(full), "%s/%s", qzcam_storage_dir(), entry->name);
     unlink(full);
+    if (!entry->video && name_is_photo(entry->name)) unlink_photo_sidecars(full);
     toast("已删除");
     gallery_refresh();
 }
@@ -469,7 +559,8 @@ static void gallery_wipe_cb(lv_event_t *event)
     if (dir) {
         struct dirent *item;
         while ((item = readdir(dir)) != NULL) {
-            if (strstr(item->d_name, ".avi") || strstr(item->d_name, ".bmp")) {
+            if (strstr(item->d_name, ".avi") || strstr(item->d_name, ".mp4") ||
+                name_is_photo(item->d_name)) {
                 char full[512];
                 snprintf(full, sizeof(full), "%s/%s", qzcam_storage_dir(), item->d_name);
                 unlink(full);
@@ -599,46 +690,54 @@ static void player_tick(lv_timer_t *timer)
                           total / 60 / qzcam_player_fps(), total / qzcam_player_fps() % 60);
 }
 
+/* 播一个录像文件（相册点录像行、以及自检钩子 qzcam_ui_play_first_video 都走这里）。
+ * AVI（未压缩 RGB565）直接读块+翻行；MP4（硬编码）交给 cam_player 用
+ * rkdemuxer + VDEC 解码。两者对外接口一样。 */
+static void player_open_video(const char *fs_path)
+{
+    if (!qzcam_player_open(fs_path)) {
+        const char *why = qzcam_player_last_error();
+        fprintf(stderr, "QZcam: 打不开录像 %s（%s）\n", fs_path, why[0] ? why : "原因不明");
+        toast(why[0] ? why : "打不开录像文件");
+        return;
+    }
+    int w = qzcam_player_frame_w(), h = qzcam_player_frame_h();
+    memset(&player_dsc, 0, sizeof(player_dsc));
+    player_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    player_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    player_dsc.header.w = (uint32_t)w;
+    player_dsc.header.h = (uint32_t)h;
+    player_dsc.header.stride = (uint32_t)w * 2;
+    player_dsc.data_size = (uint32_t)(w * h * 2);
+    player_total = qzcam_player_total_frames();
+    lv_bar_set_value(player_bar, 0, LV_ANIM_OFF);
+
+    lv_obj_remove_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(player_screen);
+
+    int period = 1000 / (qzcam_player_fps() > 0 ? qzcam_player_fps() : 15);
+    if (period < 20) period = 20;
+    player_playing = true;
+    player_timer = lv_timer_create(player_tick, (uint32_t)period, NULL);
+    fprintf(stderr, "QZcam: 开始回放 %s %dx%d %dfps 共%d帧\n",
+            fs_path, w, h, qzcam_player_fps(), player_total);
+}
+
 static void gallery_item_cb(lv_event_t *event)
 {
     gallery_entry_t *entry = (gallery_entry_t *)lv_event_get_user_data(event);
     if (!entry) return;
 
-    char path[256];
-    snprintf(path, sizeof(path), "A:%s/%s", qzcam_storage_dir(), entry->name);
+    char fs_path[512];
+    snprintf(fs_path, sizeof(fs_path), "%s/%s", qzcam_storage_dir(), entry->name);
 
     if (entry->video) {
-        /* 板载回放：AVI 是自家写的未压缩 RGB565，直接读块+翻行 */
-        char fs_path[512];
-        snprintf(fs_path, sizeof(fs_path), "%s/%s", qzcam_storage_dir(), entry->name);
-        if (!qzcam_player_open(fs_path)) {
-            toast("打不开录像文件");
-            return;
-        }
-        int w = qzcam_player_frame_w(), h = qzcam_player_frame_h();
-        memset(&player_dsc, 0, sizeof(player_dsc));
-        player_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-        player_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-        player_dsc.header.w = (uint32_t)w;
-        player_dsc.header.h = (uint32_t)h;
-        player_dsc.header.stride = (uint32_t)w * 2;
-        player_dsc.data_size = (uint32_t)(w * h * 2);
-        player_total = qzcam_player_total_frames();
-        lv_bar_set_value(player_bar, 0, LV_ANIM_OFF);
-
-        lv_obj_remove_flag(player_screen, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(player_screen);
-
-        int period = 1000 / (qzcam_player_fps() > 0 ? qzcam_player_fps() : 15);
-        if (period < 20) period = 20;
-        player_playing = true;
-        player_timer = lv_timer_create(player_tick, (uint32_t)period, NULL);
+        player_open_video(fs_path);
         return;
     }
-    /* 照片：全屏看（LVGL 自带 BMP 解码 + FS_STDIO，路径用 A: 前缀） */
+    /* 照片：全屏看（LVGL 解码 JPEG(TJPGD)/BMP + FS_STDIO，路径用 A: 前缀） */
     viewer_idx = entry->viewer_idx;
-    lv_image_set_src(viewer_image, path);
-    lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_CENTER);
+    viewer_show_photo(fs_path);
     lv_obj_remove_flag(viewer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(viewer);
 }
@@ -669,8 +768,9 @@ static void gallery_refresh(void)
     struct dirent *item;
     while (count < 50 && (item = readdir(dir)) != NULL) {
         const char *name = item->d_name;
-        bool video = strstr(name, ".avi") != NULL;
-        bool photo = strstr(name, ".bmp") != NULL;
+        /* 录像两种容器都认：AVI（未压缩，延时/兜底）与 MP4（硬编码） */
+        bool video = strstr(name, ".avi") != NULL || strstr(name, ".mp4") != NULL;
+        bool photo = name_is_photo(name);
         if (!video && !photo) continue;
 
         char full[512];
@@ -749,6 +849,7 @@ static void gallery_refresh(void)
 static void gallery_open_cb(lv_event_t *event)
 {
     (void)event;
+    qzcam_rec_repair_all();   /* 开机后插的卡也可能带着掉电录像，进相册顺手补 */
     gallery_refresh();
     lv_obj_remove_flag(gallery, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(gallery);
@@ -1320,6 +1421,10 @@ static const int cycle_fps[]   = { 30, 25, 15 };
 static const char *const cycle_fps_names[]   = { "30fps", "25fps", "15fps" };
 static const int cycle_codec[] = { 0, 1 };
 static const char *const cycle_codec_names[] = { "H.265", "H.264" };
+/* 录制画质 → VENC 码率上限（1296p 智能编码实测口径）：
+ * 省空间≈2MB/分钟、标准≈8MB/分钟、高画质≈31MB/分钟 */
+static const int cycle_quality[] = { 0, 1, 2 };
+static const char *const cycle_quality_names[] = { "省空间", "标准", "高画质" };
 static const int cycle_br[]    = { 0, 1, 2 };
 static const char *const cycle_br_names[]    = { "智能编码", "CBR", "VBR" };
 static const int cycle_nr[]    = { 0, 1, 2, 3 };
@@ -1437,6 +1542,7 @@ static void build_settings(lv_obj_t *screen)
     make_cycle_row(list, y, "帧率", &s->rec_fps, cycle_fps, cycle_fps_names, 3); y += 26;
     make_cycle_row(list, y, "编码格式", &s->codec, cycle_codec, cycle_codec_names, 2); y += 26;
     make_cycle_row(list, y, "码率控制", &s->bitrate_mode, cycle_br, cycle_br_names, 3); y += 26;
+    make_cycle_row(list, y, "录制画质", &s->rec_quality, cycle_quality, cycle_quality_names, 3); y += 26;
     make_switch_row(list, y, "电子防抖", &s->eis); y += 30;
 
     make_group_header(list, y, "图像"); y += 16;
@@ -1536,7 +1642,7 @@ static void build_gallery(lv_obj_t *screen)
     lv_obj_align(back, LV_ALIGN_TOP_RIGHT, -6, 6);
     lv_obj_add_event_cb(back, viewer_close_cb, LV_EVENT_CLICKED, NULL);
 
-    /* ---- 视频播放器（录像 = 未压缩 RGB565 AVI，板上直接放）---- */
+    /* ---- 视频播放器（录像：AVI 直读 / MP4 硬解码，cam_player 里分后端）---- */
     player_screen = lv_obj_create(screen);
     lv_obj_remove_flag(player_screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(player_screen, qzcam_panel_w, qzcam_panel_h);
@@ -1583,13 +1689,13 @@ void qzcam_ui_open_gallery(void)
 
 void qzcam_ui_view_first_photo(void)
 {
-    /* 找出目录里最新的一张 BMP（文件名带时间戳，字典序最大的就是最新的） */
+    /* 找出目录里最新的一张照片（文件名带时间戳，字典序最大的就是最新的） */
     DIR *dir = opendir(qzcam_storage_dir());
     if (!dir) return;
     char newest[80] = "";
     struct dirent *item;
     while ((item = readdir(dir)) != NULL) {
-        if (!strstr(item->d_name, ".bmp")) continue;
+        if (!name_is_photo(item->d_name)) continue;
         if (strcmp(item->d_name, newest) > 0)
             snprintf(newest, sizeof(newest), "%.79s", item->d_name);
     }
@@ -1598,12 +1704,37 @@ void qzcam_ui_view_first_photo(void)
         toast("相册里还没有照片");
         return;
     }
-    char path[256];
-    snprintf(path, sizeof(path), "A:%s/%s", qzcam_storage_dir(), newest);
-    lv_image_set_src(viewer_image, path);
-    lv_image_set_inner_align(viewer_image, LV_IMAGE_ALIGN_CENTER);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", qzcam_storage_dir(), newest);
+    viewer_show_photo(path);
     lv_obj_remove_flag(viewer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(viewer);
+}
+
+void qzcam_ui_play_first_video(void)
+{
+    /* 找最新的一个录像（.mp4/.avi，文件名带时间戳，字典序最大即最新）并直接播 ——
+     * 自检用：板载 MP4 回放（rkdemuxer + VDEC）这条链路没法只看代码确认。 */
+    DIR *dir = opendir(qzcam_storage_dir());
+    fprintf(stderr, "QZcam: 自检回放：存储目录=%s opendir=%s\n",
+            qzcam_storage_dir(), dir ? "OK" : "失败");
+    if (!dir) return;
+    char newest[80] = "";
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (!strstr(item->d_name, ".mp4") && !strstr(item->d_name, ".avi")) continue;
+        if (strcmp(item->d_name, newest) > 0)
+            snprintf(newest, sizeof(newest), "%.79s", item->d_name);
+    }
+    closedir(dir);
+    fprintf(stderr, "QZcam: 自检回放：最新录像=%s\n", newest[0] ? newest : "(没找到)");
+    if (!newest[0]) {
+        toast("相册里还没有录像");
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", qzcam_storage_dir(), newest);
+    player_open_video(path);
 }
 
 void qzcam_ui_set_mode(int video)

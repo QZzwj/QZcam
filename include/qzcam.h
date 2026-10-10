@@ -54,6 +54,8 @@ typedef struct {
     int rec_fps;       /**< 30 / 25 / 15 */
     int codec;         /**< 0=H.265 1=H.264 */
     int bitrate_mode;  /**< 0=智能编码 1=CBR 2=VBR */
+    int rec_quality;   /**< 录制画质（决定码率上限）：0=省空间≈2MB/分
+                            1=标准≈8MB/分 2=高画质≈31MB/分（1296p 智能编码实测口径） */
     bool eis;          /**< 电子防抖 */
     int loop_seconds;  /**< 循环分段：60/180/300/600 */
     bool loop_overwrite; /**< 循环覆盖 */

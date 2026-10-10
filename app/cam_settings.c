@@ -33,6 +33,7 @@ static qzcam_settings_t settings = {
     .rec_fps = 30,
     .codec = 0,         /* H.265 */
     .bitrate_mode = 0,  /* 智能编码 */
+    .rec_quality = 0,   /* 省空间：按"文件尽量小"的口径定的默认档 */
     .eis = false,
     .loop_seconds = 180,
     .loop_overwrite = true,
@@ -94,6 +95,7 @@ void qzcam_settings_reset(void)
     d.rec_fps = 30;
     d.codec = 0;
     d.bitrate_mode = 0;
+    d.rec_quality = 0;
     d.eis = false;
     d.loop_seconds = 180;
     d.loop_overwrite = true;
@@ -150,6 +152,7 @@ static const set_entry_t set_entries[] = {
     { "rec_fps",       NULL,                    &settings.rec_fps,   15,  75 },
     { "codec",         NULL,                    &settings.codec,      0,   1 },
     { "bitrate_mode",  NULL,                    &settings.bitrate_mode, 0, 2 },
+    { "rec_quality",   NULL,                    &settings.rec_quality, 0,  2 },
     { "eis",           &settings.eis,           NULL,               0,   1 },
     { "loop_seconds",  NULL,                    &settings.loop_seconds, 60, 600 },
     { "loop_overwrite",&settings.loop_overwrite,NULL,               0,   1 },

@@ -45,6 +45,7 @@ add_executable(qzcam
     app/touch.c
     app/cam_storage.c
     app/cam_record.c
+    app/cam_encoder.c
     app/cam_settings.c
     app/cam_ui.c
     app/cam_image.c
@@ -74,12 +75,19 @@ if(QZCAM_MEDIA_DIR)
     list(REMOVE_DUPLICATES QZCAM_RKAIQ_INCLUDE_DIRS)
     target_include_directories(qzcam PRIVATE ${QZCAM_RKAIQ_INCLUDE_DIRS})
     target_link_directories(qzcam PRIVATE "${QZCAM_MEDIA_DIR}/lib")
-    # 顺序有讲究：rockit/mpp 在前（rkaiq 的 3A 回调会用到它们），rkaiq 在后
-    target_link_libraries(qzcam PRIVATE rockit rockchip_mpp rkaiq rga)
+    # 顺序有讲究：rockit/mpp 在前（rkaiq 的 3A 回调会用到它们），rkaiq 在后。
+    # 用 rockit_full：它是 rockit 的超集，多了回放要的 VDEC（RK_MPI_VDEC_*）。
+    target_link_libraries(qzcam PRIVATE rockit_full rockchip_mpp rkaiq rga drm)
     set(QZCAM_JPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../SDK/project/app/component/third_libs" CACHE PATH "SDK JPEG package")
     target_include_directories(qzcam PRIVATE "${QZCAM_JPEG_ROOT}/include/libjpeg9")
     target_link_directories(qzcam PRIVATE "${QZCAM_JPEG_ROOT}/lib/arm-rockchip830-linux-uclibcgnueabihf")
-    target_link_libraries(qzcam PRIVATE jpeg rkmuxer)
+    # rkmuxer/rkdemuxer：硬编码录像的 MP4 封装与回放拆包（cam_encoder / cam_player）
+    target_link_libraries(qzcam PRIVATE jpeg rkmuxer rkdemuxer)
+    # ld 解析共享库的间接依赖（rkdemuxer → libz.so.1）不走 -L，得显式给 -rpath-link，
+    # 否则链接期一直报 "not found"（运行期由设备 rootfs 的 libz 满足）。
+    target_link_options(qzcam PRIVATE
+        "-Wl,-rpath-link,${QZCAM_MEDIA_DIR}/lib"
+        "-Wl,-rpath-link,${QZCAM_JPEG_ROOT}/lib/arm-rockchip830-linux-uclibcgnueabihf")
     target_compile_definitions(qzcam PRIVATE QZCAM_HAVE_JPEG=1)
     message(STATUS "QZcam: ISP 取景已启用，媒体库目录 ${QZCAM_MEDIA_DIR}")
 else()

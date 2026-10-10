@@ -685,6 +685,9 @@ static void *worker_main(void *argument)
                     cap_h = h;
                     cap_stride = stride;
                     cap_uv_h = qzcam_isp_virtual_height();
+                    /* 录像走硬件编码时直接吃这一帧 NV12（在 release 之前，
+                     * 编码器还要引用它的 DMA 缓冲）；没在录时是空操作。 */
+                    qzcam_rec_submit_isp(qzcam_isp_held_frame(), w, h, stride, cap_uv_h);
                     convert_frame(nv12);
                 }
                 qzcam_isp_release();

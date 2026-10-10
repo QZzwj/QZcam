@@ -229,6 +229,90 @@ bool qzcam_image_jpeg(const char *path, const uint8_t *rgb, int w, int h, int qu
 }
 
 static void le32(uint8_t *p, unsigned v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
+#if defined(QZCAM_HAVE_JPEG)
+/* 解码 JPEG → out_w × out_h 的 RGB565（等比缩放 + 居中留黑）。
+ *
+ * 为什么缩放自己做：LVGL 9.2 的软件缩放只能放大，"缩小"（scale < 256）对从文件
+ * 流式解码的源一个像素都画不出来（实测整屏黑）；而 libjpeg 自带
+ * scale_num/scale_denom 的 1/2、1/4、1/8 缩放解码 —— 既绕开那条坏路，又把解码量
+ * 从 3M 像素降到几十 k（1296p 照片开 1/4 只有 576×324，再最近邻缩到面板尺寸）。 */
+bool qzcam_image_decode_jpeg_rgb565(const char *path, uint8_t *out, int out_w, int out_h)
+{
+    if (!path || !out || out_w <= 0 || out_h <= 0) return false;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    struct jpeg_decompress_struct c;
+    jpeg_error_t error;
+    memset(&c, 0, sizeof(c));
+    c.err = jpeg_std_error(&error.base);
+    error.base.error_exit = jpeg_fail;
+
+    uint8_t *row = NULL;
+    bool ok = false;
+
+    if (setjmp(error.jump)) {
+        jpeg_destroy_decompress(&c);
+    } else {
+        jpeg_create_decompress(&c);
+        jpeg_stdio_src(&c, f);
+        jpeg_read_header(&c, TRUE);
+
+        /* 取最小的 1/N（N ∈ {1,2,4,8}）使解码结果仍不小于目标框 */
+        unsigned n = 1;
+        while (n < 8 && (c.image_width / (n * 2) >= (JDIMENSION)out_w ||
+                         c.image_height / (n * 2) >= (JDIMENSION)out_h))
+            n *= 2;
+        c.scale_num = 1;
+        c.scale_denom = n;
+
+        if (jpeg_start_decompress(&c)) {
+            int dw = (int)c.output_width, dh = (int)c.output_height;
+            row = malloc((size_t)dw * 3);
+            if (row) {
+                int fw = out_w, fh = out_h;
+                if ((long)dw * out_h > (long)dh * out_w) fh = out_w * dh / dw;  /* 源更宽 */
+                else                                     fw = out_h * dw / dh;  /* 源更高 */
+                int ox = (out_w - fw) / 2, oy = (out_h - fh) / 2;
+
+                memset(out, 0, (size_t)out_w * (size_t)out_h * 2);
+                ok = true;
+                for (int ty = 0; ty < fh && ok; ty++) {
+                    int sy = ty * dh / fh;              /* 目标行 → 源行（最近邻） */
+                    while ((int)c.output_scanline <= sy) {
+                        JSAMPROW rp = row;
+                        if (jpeg_read_scanlines(&c, &rp, 1) != 1) break;
+                    }
+                    if ((int)c.output_scanline <= sy) { ok = false; break; }
+                    uint16_t *dstrow =
+                        (uint16_t *)(out + ((size_t)(oy + ty) * (size_t)out_w + (size_t)ox) * 2);
+                    for (int tx = 0; tx < fw; tx++) {
+                        const uint8_t *p = row + (size_t)(tx * dw / fw) * 3;
+                        dstrow[tx] = (uint16_t)(((p[0] & 0xF8) << 8) |
+                                                ((p[1] & 0xFC) << 3) | (p[2] >> 3));
+                    }
+                }
+            }
+            jpeg_finish_decompress(&c);
+        }
+        jpeg_destroy_decompress(&c);
+    }
+
+    free(row);
+    fclose(f);
+    return ok;
+}
+#else
+/* 没有 libjpeg 的构建（宿主测试）：不做缩放解码，界面会退回让 LVGL 自己解 */
+bool qzcam_image_decode_jpeg_rgb565(const char *path, uint8_t *out, int out_w, int out_h)
+{
+    (void)path; (void)out; (void)out_w; (void)out_h;
+    return false;
+}
+#endif
+
 bool qzcam_image_bmp(const char *path, const uint8_t *rgb, int w, int h)
 {
     FILE *f = fopen(path, "wb");

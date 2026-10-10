@@ -48,6 +48,11 @@ int main(void)
         fprintf(stderr, "QZcam: 取景启动失败：%s\n", qzcam_cam_status());
     }
 
+    /* 掉电保护：把上次没收尾的录像文件补回索引（相册每次打开还会再补一次，
+     * 覆盖「开机后才插卡」的情况）。 */
+    int repaired = qzcam_rec_repair_all();
+    if (repaired > 0) fprintf(stderr, "QZcam: 恢复 %d 个掉电录像文件\n", repaired);
+
     lv_obj_t *screen = qzcam_ui_create();
     lv_screen_load(screen);
     lv_refr_now(NULL);
@@ -59,16 +64,22 @@ int main(void)
      * 验证「取景 → 转码 → 参数 → 存图」整条链路（没有触摸屏可点）。 */
     /* 自检钩子：QZCAM_TEST_REC=秒 —— 1 秒后开始录像，录满 N 秒停止并打印结果，
      * 用来在开发机上验证「取景 → 录像落盘」这条链路（AVI 可直接用 ffprobe 校验）。 */
+    /* 注意：这几个时刻都要相对「主循环第一次跑」来算，不能用 lv_tick 从 0 起的
+     * 绝对值 —— 真机上 ISP + rkaiq 3A 初始化要 9 秒以上，等主循环开始时 tick 早就
+     * 越过 1 秒了，钩子会在同一次循环里把"开始"和"停止"背靠背跑完（录到 0 帧）。 */
     const char *rec_env = getenv("QZCAM_TEST_REC");
     double rec_seconds = rec_env ? atof(rec_env) : 0.0;
-    double rec_start_at = 1.0;
+    double loop_origin = (double)lv_tick_get() / 1000.0;
+    double rec_start_at = loop_origin + 1.0;
     double rec_stop_at = rec_start_at + rec_seconds;
     bool rec_started = false, rec_done = false;
 
-    /* 自检钩子：QZCAM_TEST_GALLERY=1 打开相册；QZCAM_TEST_VIEWER=1 再看最新那张照片 */
+    /* 自检钩子：QZCAM_TEST_GALLERY=1 打开相册；QZCAM_TEST_VIEWER=1 再看最新那张照片；
+     * QZCAM_TEST_PLAY=1 直接回放最新一段录像（MP4 走 VDEC，没法只看代码确认）。 */
     bool test_gallery = getenv("QZCAM_TEST_GALLERY") != NULL;
     bool test_viewer = getenv("QZCAM_TEST_VIEWER") != NULL;
-    bool gallery_done = false, viewer_done = false;
+    bool test_play = getenv("QZCAM_TEST_PLAY") != NULL;
+    bool gallery_done = false, viewer_done = false, play_done = false;
 
     const char *snap_env = getenv("QZCAM_SNAP_AT");
     double snap_at = snap_env ? atof(snap_env) : 0.0;
@@ -85,13 +96,19 @@ int main(void)
         qzcam_touch_poll();
 
         if ((test_gallery || test_viewer) && !gallery_done) {
-            if ((double)lv_tick_get() / 1000.0 >= 2.0) {
+            if ((double)lv_tick_get() / 1000.0 >= loop_origin + 0.3) {
                 gallery_done = true;
                 qzcam_ui_open_gallery();
             }
         }
+        if (test_play && !play_done) {
+            if ((double)lv_tick_get() / 1000.0 >= loop_origin + 1.0) {
+                play_done = true;
+                qzcam_ui_play_first_video();
+            }
+        }
         if (test_viewer && gallery_done && !viewer_done) {
-            if ((double)lv_tick_get() / 1000.0 >= 2.6) {
+            if ((double)lv_tick_get() / 1000.0 >= loop_origin + 0.9) {
                 viewer_done = true;
                 qzcam_ui_view_first_photo();
             }
